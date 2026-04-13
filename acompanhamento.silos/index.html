@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATTO Sementes | Gestão de Silos e Performance</title>
+    <!-- Tailwind CSS para Estilização -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons para Ícones -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+        
+        body { font-family: 'Inter', sans-serif; }
+
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.95; transform: scale(0.99); }
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            75% { transform: translateX(2px); }
+        }
+        .animate-shake { animation: shake 0.5s infinite; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+
+    <div id="app">
+        <!-- O conteúdo será renderizado dinamicamente pelo JavaScript -->
+    </div>
+
+    <script>
+        // --- CONFIGURAÇÃO INICIAL E ESTADO ---
+        const FIXED_SILOS = [
+            ...Array.from({ length: 16 }, (_, i) => `PULMÃO ${String(i + 1).padStart(2, '0')}`),
+            ...Array.from({ length: 4 }, (_, i) => `REPASSE ${String(i + 1).padStart(2, '0')}`)
+        ];
+
+        let state = {
+            view: 'dashboard', // dashboard | beneficiamento
+            selectedSiloId: null,
+            siloMap: {},
+            completedHistory: [],
+            searchTerm: '',
+            errorMessage: null,
+            // Estados temporários para a aba de beneficiamento
+            form: {
+                responsible: '',
+                startTime: { date: '', hour: '' },
+                endTime: { date: '', hour: '' },
+                stopStart: { date: '', hour: '' },
+                stopEnd: { date: '', hour: '' },
+                stopReason: ''
+            }
+        };
+
+        // --- FUNÇÕES DE UTILIDADE ---
+
+        function getSiloCapacity(name) {
+            const num = parseInt(name.match(/\d+/)?.[0]);
+            if (name.includes('REPASSE')) return 72;
+            const silos72 = [1, 8, 9, 16];
+            return silos72.includes(num) ? 72 : 84;
+        }
+
+        function highlightNumbers(text) {
+            if (!text) return '';
+            return text.toString().replace(/(\d+)/g, '<span class="bg-yellow-300 text-slate-900 px-1 rounded font-black shadow-sm mx-0.5 border border-yellow-400">$1</span>');
+        }
+
+        function calculateAutoTons(o1, o2) {
+            const text = `${o1} ${o2}`.toLowerCase();
+            const matches = text.match(/\d+/g);
+            if (matches && (text.includes('secador') || text.includes('sec'))) {
+                const unique = [...new Set(matches)];
+                return unique.length * 12;
+            }
+            return 0;
+        }
+
+        function normalizeSiloName(name) {
+            if (!name) return null;
+            const clean = name.toString().toUpperCase().trim();
+            const numMatch = clean.match(/\d+/);
+            const num = numMatch ? String(numMatch[0]).padStart(2, '0') : null;
+            if (!num) return null;
+            
+            if (clean.includes('R')) return `REPASSE ${num}`;
+            return `PULMÃO ${num}`;
+        }
+
+        // --- LÓGICA DE NEGÓCIO ---
+
+        function processImport() {
+            const rawData = document.getElementById('raw-data-input').value;
+            if (!rawData.trim()) return;
+
+            const rows = rawData.split('\n');
+            rows.forEach(row => {
+                const col = row.split('\t');
+                if (col.length < 5 || row.toLowerCase().includes('tipo de amostra')) return;
+
+                const normName = normalizeSiloName(col[1]);
+                if (normName && FIXED_SILOS.includes(normName)) {
+                    const existing = state.siloMap[normName];
+                    const autoTons = calculateAutoTons(col[3], col[4]);
+                    const mixQty = parseInt(col[14]) || 0;
+
+                    state.siloMap[normName] = {
+                        tipoAmostra: col[0] || '-',
+                        dataColeta: col[2] || '-',
+                        origem1: col[3] || '',
+                        origem2: col[4] || '',
+                        horaInicio: col[5] || '-',
+                        respColeta: col[6] || '-',
+                        cultivar: col[9] || '-',
+                        umidade: col[10] || '-',
+                        temp: col[11] || '-',
+                        misturaQtde: mixQty,
+                        misturaCultivar: col[15] || '',
+                        analista: col[17] || '-',
+                        statusLASA: col[18] || 'EM ANÁLISE',
+                        tonelagem: autoTons > 0 ? autoTons : (existing?.tonelagem || 0),
+                        statusBeneficiamento: existing?.statusBeneficiamento || 'Irá Beneficiar',
+                        performance: existing?.performance || null,
+                        lastUpdate: new Date().toLocaleTimeString()
+                    };
+                }
+            });
+            render();
+        }
+
+        function updateSiloStatus(name, newStatus) {
+            const data = state.siloMap[name];
+            if (newStatus === 'Em Beneficiamento' && (!data.tonelagem || data.tonelagem <= 0)) {
+                state.errorMessage = {
+                    title: "Silo Vazio",
+                    message: `Informe a tonelagem do ${name} antes de iniciar o beneficiamento.`,
+                    silo: name
+                };
+                render();
+                return;
+            }
+
+            state.siloMap[name].statusBeneficiamento = newStatus;
+            if (newStatus === 'Em Beneficiamento') {
+                state.selectedSiloId = name;
+                state.view = 'beneficiamento';
+                resetForm();
+            }
+            render();
+        }
+
+        function resetForm() {
+            state.form = {
+                responsible: '',
+                startTime: { date: '', hour: '' },
+                endTime: { date: '', hour: '' },
+                stopStart: { date: '', hour: '' },
+                stopEnd: { date: '', hour: '' },
+                stopReason: ''
+            };
+        }
+
+        function setNow(field) {
+            const now = new Date();
+            const d = now.toISOString().split('T')[0];
+            const h = now.toTimeString().split(' ')[0].substring(0, 5);
+            
+            if (field === 'start') state.form.startTime = { date: d, hour: h };
+            if (field === 'end') state.form.endTime = { date: d, hour: h };
+            if (field === 'stopS') state.form.stopStart = { date: d, hour: h };
+            if (field === 'stopE') state.form.stopEnd = { date: d, hour: h };
+            render();
+        }
+
+        function calculateMetrics() {
+            const f = state.form;
+            if (!f.startTime.date || !f.endTime.date) return null;
+
+            const start = new Date(`${f.startTime.date}T${f.startTime.hour}`);
+            const end = new Date(`${f.endTime.date}T${f.endTime.hour}`);
+            const tons = state.siloMap[state.selectedSiloId]?.tonelagem || 0;
+
+            let totalMs = end - start;
+            if (totalMs <= 0) return { rhythm: 0, effectiveHours: 0, stoppageHours: 0 };
+
+            let stopMs = 0;
+            if (f.stopStart.date && f.stopEnd.date) {
+                const sS = new Date(`${f.stopStart.date}T${f.stopStart.hour}`);
+                const sE = new Date(`${f.stopEnd.date}T${f.stopEnd.hour}`);
+                stopMs = Math.max(0, sE - sS);
+            }
+
+            const effectiveMs = totalMs - stopMs;
+            const effectiveHrs = effectiveMs / (1000 * 60 * 60);
+            const rhythm = effectiveHrs > 0 ? (tons / effectiveHrs).toFixed(2) : 0;
+
+            return {
+                rhythm,
+                effectiveHours: effectiveHrs.toFixed(2),
+                stoppageHours: (stopMs / (1000 * 60 * 60)).toFixed(2)
+            };
+        }
+
+        function finalizeBeneficiamento() {
+            const metrics = calculateMetrics();
+            const silo = state.selectedSiloId;
+            
+            const perfData = {
+                ...metrics,
+                responsavel: state.form.responsible,
+                parada: state.form.stopReason || 'Nenhuma',
+                inicio: `${state.form.startTime.date} ${state.form.startTime.hour}`,
+                fim: `${state.form.endTime.date} ${state.form.endTime.hour}`
+            };
+
+            state.siloMap[silo].statusBeneficiamento = 'Beneficiado';
+            state.siloMap[silo].performance = perfData;
+            
+            state.completedHistory.unshift({
+                name: silo,
+                cultivar: state.siloMap[silo].cultivar,
+                tonelagem: state.siloMap[silo].tonelagem,
+                umidade: state.siloMap[silo].umidade,
+                performance: perfData
+            });
+
+            state.view = 'dashboard';
+            state.selectedSiloId = null;
+            render();
+        }
+
+        // --- COMPONENTES DE INTERFACE ---
+
+        function renderHeader() {
+            const active = Object.values(state.siloMap).length;
+            const done = state.completedHistory.length;
+            return `
+                <header class="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-md">
+                    <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-green-600 p-2.5 rounded-2xl shadow-lg shadow-green-100 text-white">
+                                <i data-lucide="sprout"></i>
+                            </div>
+                            <div>
+                                <h1 class="text-2xl font-black text-slate-900 uppercase leading-none">ATTO Sementes</h1>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mt-1">Silos Pulmão • Controle Técnico</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <div class="bg-slate-50 px-5 py-2.5 rounded-2xl border border-slate-200 flex items-center gap-8 shadow-inner">
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-black uppercase mb-1">Cargas</p>
+                                    <p class="text-xl font-black">${active}</p>
+                                </div>
+                                <div class="w-[1px] h-10 bg-slate-200"></div>
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-black mb-1">Concluídos</p>
+                                    <p class="text-xl font-black text-blue-600">${done}</p>
+                                </div>
+                            </div>
+                            <button onclick="state.siloMap={}; state.completedHistory=[]; render();" class="p-3 text-red-500 hover:bg-red-50 rounded-2xl transition-all border border-transparent hover:border-red-100">
+                                <i data-lucide="trash-2"></i>
+                            </button>
+                        </div>
+                    </div>
+                </header>
+            `;
+        }
+
+        function renderDashboard() {
+            return `
+                <main class="max-w-7xl mx-auto p-4 md:p-8 space-y-8">
+                    <!-- Import Section -->
+                    <section class="bg-white rounded-[2.5rem] shadow-xl border border-slate-200 overflow-hidden">
+                        <div class="bg-slate-900 p-5 flex items-center justify-between text-white">
+                            <div class="flex items-center gap-3">
+                                <div class="bg-green-500/20 p-2 rounded-xl border border-green-500/30 text-green-400">
+                                    <i data-lucide="clipboard-paste"></i>
+                                </div>
+                                <h2 class="text-sm font-black uppercase tracking-widest">Sincronizar Planilha VOC</h2>
+                            </div>
+                        </div>
+                        <div class="p-8 space-y-5">
+                            <textarea id="raw-data-input" class="w-full h-28 p-5 rounded-[1.5rem] border-2 border-slate-100 focus:border-blue-500 outline-none transition-all font-mono text-[11px] bg-slate-50 text-slate-600" placeholder="Cole os dados aqui..."></textarea>
+                            <button onclick="processImport()" class="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all bg-blue-600 text-white shadow-xl hover:bg-blue-700">Atualizar Monitoramento</button>
+                        </div>
+                    </section>
+
+                    <!-- Silos Grid -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+                        ${FIXED_SILOS.map(name => renderSiloCard(name)).join('')}
+                    </div>
+                </main>
+            `;
+        }
+
+        function renderSiloCard(name) {
+            const data = state.siloMap[name];
+            if (!data) {
+                return `
+                    <div class="rounded-[2.5rem] border-2 border-dashed border-slate-200 opacity-40 flex flex-col items-center justify-center py-12 space-y-4">
+                        <div class="p-4 bg-slate-200 rounded-full text-slate-500"><i data-lucide="warehouse"></i></div>
+                        <p class="text-[10px] font-black uppercase tracking-widest">${name}</p>
+                    </div>
+                `;
+            }
+
+            const isDone = data.statusBeneficiamento === 'Beneficiado';
+            const isActive = data.statusBeneficiamento === 'Em Beneficiamento';
+            const capacity = getSiloCapacity(name);
+            const occupancy = (data.tonelagem / capacity) * 100;
+            const humVal = parseFloat(data.umidade.replace(',', '.'));
+            const humClass = (!isNaN(humVal) && humVal >= 12 && humVal <= 13) ? "bg-green-100 border-green-300 text-green-700" : "bg-red-100 border-red-300 text-red-700";
+            const isLasaAlert = data.statusLASA.toUpperCase().includes('LASA') || data.statusLASA.toUpperCase().includes('REPROVADO');
+
+            return `
+                <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white border-slate-200 shadow-xl ${isDone ? 'opacity-60' : ''} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
+                    <div class="px-6 py-4 flex justify-between items-center rounded-t-[2.3rem] ${isDone ? 'bg-slate-400' : (isActive ? 'bg-blue-600' : 'bg-slate-900')} text-white">
+                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${name}</span></div>
+                        <span class="text-[10px] font-black">${capacity}T</span>
+                    </div>
+
+                    <div class="p-6 space-y-5 flex-1 flex flex-col">
+                        <div class="space-y-1">
+                            <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none">Ação Operacional:</span>
+                            <select onchange="updateSiloStatus('${name}', this.value)" class="w-full text-[11px] font-black py-2.5 px-3 rounded-xl border-2 outline-none cursor-pointer ${isDone ? 'bg-slate-100' : (isActive ? 'bg-blue-100 border-blue-400 text-blue-700' : 'bg-amber-50 border-amber-400 text-amber-700 animate-pulse-slow')}">
+                                <option value="Irá Beneficiar" ${data.statusBeneficiamento === 'Irá Beneficiar' ? 'selected' : ''}>AGUARDANDO</option>
+                                <option value="Em Beneficiamento" ${data.statusBeneficiamento === 'Em Beneficiamento' ? 'selected' : ''}>BENEFICIAR SILO (TPH)</option>
+                                <option value="Beneficiado" ${data.statusBeneficiamento === 'Beneficiado' ? 'selected' : ''}>JÁ BENEFICIADO</option>
+                            </select>
+                        </div>
+
+                        ${data.misturaQtde > 0 ? `
+                            <div class="p-3 rounded-2xl border-2 flex flex-col gap-1 ${data.misturaQtde > 5 ? 'bg-red-600 text-white border-red-700 animate-pulse' : 'bg-amber-100 border-amber-300 text-amber-800'}">
+                                <div class="flex items-center gap-2 text-[10px] font-black uppercase"><i data-lucide="shield-alert" class="w-4 h-4"></i> Mistura: ${data.misturaCultivar}</div>
+                            </div>
+                        ` : ''}
+
+                        <div class="bg-slate-50 p-3 rounded-2xl border border-slate-200 flex flex-col gap-1 shadow-sm">
+                            <span class="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5 leading-none"><i data-lucide="calendar" class="w-3 h-3 text-blue-600"></i> Carregamento</span>
+                            <div class="flex items-center justify-between font-black text-slate-800 text-[11px]">
+                                <span>${data.dataColeta}</span>
+                                <div class="h-3 w-[1px] bg-slate-300"></div>
+                                <span>${data.horaInicio}</span>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-between items-center bg-white border border-slate-200 p-2 rounded-xl shadow-sm">
+                            <span class="text-[9px] font-black text-slate-400 uppercase">Tonelagem:</span>
+                            <div class="flex items-center gap-1 px-2 py-0.5 rounded-lg border border-slate-200 ${!data.tonelagem || data.tonelagem <= 0 ? 'bg-red-50 border-red-300 animate-shake' : 'bg-slate-50'}">
+                                <input type="number" value="${data.tonelagem}" onchange="state.siloMap['${name}'].tonelagem = parseFloat(this.value); render();" class="bg-transparent text-sm font-black w-10 outline-none text-right placeholder:text-red-300" />
+                                <span class="text-[10px] font-bold text-slate-400 uppercase">T</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <p class="text-[9px] font-black text-slate-400 uppercase mb-1 leading-none">Cultivar</p>
+                            <h4 class="text-sm font-black text-slate-900 leading-tight">${data.cultivar}</h4>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="p-3 rounded-2xl border-2 flex flex-col shadow-sm ${humClass}">
+                                <span class="text-[9px] font-black uppercase mb-1 flex items-center gap-1"><i data-lucide="droplets" class="w-3 h-3"></i> Umid.</span>
+                                <span class="text-lg font-black">${data.umidade}%</span>
+                            </div>
+                            <div class="bg-slate-50 border-2 border-slate-100 p-3 rounded-2xl flex flex-col shadow-sm">
+                                <span class="text-[9px] font-black text-slate-400 uppercase mb-1 flex items-center gap-1"><i data-lucide="thermometer" class="w-3 h-3"></i> Temp.</span>
+                                <span class="text-lg font-black text-slate-800">${data.temp}°C</span>
+                            </div>
+                        </div>
+
+                        ${data.performance ? `
+                            <div class="bg-blue-600 text-white p-3 rounded-2xl space-y-2 shadow-lg">
+                                <div class="flex items-center justify-between border-b border-white/20 pb-1.5">
+                                    <span class="text-[8px] font-black uppercase opacity-70">Ritmo</span>
+                                    <span class="text-md font-black">${data.performance.ritmo} T/h</span>
+                                </div>
+                                <div class="flex items-center gap-2"><i data-lucide="user-check" class="w-3 h-3 text-blue-200"></i><span class="text-[9px] font-bold uppercase truncate">${data.performance.responsavel}</span></div>
+                            </div>
+                        ` : ''}
+
+                        <div class="bg-slate-900 p-4 rounded-3xl space-y-3 shadow-lg mt-auto">
+                            <div class="flex flex-col">
+                                <span class="text-[9px] font-black text-slate-500 uppercase mb-1.5 tracking-widest leading-none">Origem:</span>
+                                <div class="text-[11px] text-white font-bold bg-slate-800/40 p-2 rounded-xl border border-slate-700">
+                                    <div class="mb-1">${highlightNumbers(data.origem2)}</div>
+                                    <div class="text-[10px] text-slate-400 font-medium italic border-t border-slate-700/50 pt-1">${highlightNumbers(data.origem1)}</div>
+                                </div>
+                            </div>
+                            <div class="flex flex-col border-t border-slate-800 pt-2 text-green-400">
+                                <span class="text-[9px] font-black text-slate-500 uppercase mb-1 flex items-center gap-2 leading-none"><i data-lucide="hard-hat" class="w-3 h-3 text-amber-500"></i> Operador Carga:</span>
+                                <span class="text-[11px] font-black uppercase truncate">${data.respColeta}</span>
+                            </div>
+                        </div>
+
+                        <div class="p-2.5 rounded-xl border-2 text-center flex flex-col gap-1 transition-colors ${isLasaAlert ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'}">
+                            <span class="text-[8px] font-black text-slate-400 uppercase leading-none">Qualidade (LASA)</span>
+                            <span class="text-xs font-black uppercase tracking-tighter">${data.statusLASA}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderBeneficiamento() {
+            const data = state.siloMap[state.selectedSiloId];
+            const metrics = calculateMetrics();
+            const isReady = (state.form.responsible.length > 2 && state.form.startTime.date && state.form.endTime.date && metrics?.rhythm > 0);
+
+            return `
+                <div class="min-h-screen bg-slate-950 font-sans text-white p-4 md:p-8 flex flex-col">
+                    <header class="max-w-7xl mx-auto w-full mb-8 flex items-center justify-between border-b border-slate-800 pb-6">
+                        <button onclick="state.view='dashboard'; state.selectedSiloId=null; render();" class="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 px-4 py-2 rounded-xl font-bold text-sm border border-slate-800 text-slate-400">
+                            <i data-lucide="arrow-left"></i> Painel Geral
+                        </button>
+                        <h1 class="text-2xl font-black uppercase text-green-400 tracking-widest">Linha de Beneficiamento</h1>
+                        <div class="bg-green-500/10 text-green-400 border border-green-500/20 px-6 py-2 rounded-2xl flex items-center gap-3">
+                            <i data-lucide="play-circle" class="animate-pulse"></i>
+                            <span class="font-black text-lg uppercase">${state.selectedSiloId}</span>
+                        </div>
+                    </header>
+
+                    <main class="max-w-7xl mx-auto w-full space-y-12">
+                        <section class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                            <div class="lg:col-span-8 space-y-6">
+                                <div class="bg-slate-900 rounded-[2.5rem] p-8 border-2 border-slate-800 shadow-2xl">
+                                    <div class="space-y-6">
+                                        <div>
+                                            <label class="text-[11px] font-black uppercase text-slate-400 block mb-2 tracking-widest">Responsável pelo Lançamento</label>
+                                            <input type="text" value="${state.form.responsible}" oninput="state.form.responsible = this.value; render();" placeholder="Nome completo..." class="w-full bg-slate-950 border-2 border-slate-800 rounded-2xl px-6 py-4 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+                                        </div>
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                            <div class="bg-slate-950/40 p-6 rounded-3xl border border-slate-800">
+                                                <div class="flex justify-between items-center mb-4 text-[10px] font-black uppercase text-slate-500">Início Descarga <button onclick="setNow('start')" class="bg-blue-600 text-white px-3 py-1 rounded">AGORA</button></div>
+                                                <div class="flex gap-2"><input type="date" value="${state.form.startTime.date}" oninput="state.form.startTime.date = this.value; render();" class="bg-slate-900 rounded-xl p-3 flex-1 text-xs" /><input type="time" value="${state.form.startTime.hour}" oninput="state.form.startTime.hour = this.value; render();" class="bg-slate-900 rounded-xl p-3 text-xs" /></div>
+                                            </div>
+                                            <div class="bg-slate-950/40 p-6 rounded-3xl border border-slate-800">
+                                                <div class="flex justify-between items-center mb-4 text-[10px] font-black uppercase text-slate-500">Fim Descarga <button onclick="setNow('end')" class="bg-green-600 text-white px-3 py-1 rounded">AGORA</button></div>
+                                                <div class="flex gap-2"><input type="date" value="${state.form.endTime.date}" oninput="state.form.endTime.date = this.value; render();" class="bg-slate-900 rounded-xl p-3 flex-1 text-xs" /><input type="time" value="${state.form.endTime.hour}" oninput="state.form.endTime.hour = this.value; render();" class="bg-slate-900 rounded-xl p-3 text-xs" /></div>
+                                            </div>
+                                        </div>
+                                        <div class="bg-slate-900 rounded-[2rem] p-6 border border-amber-500/20 shadow-xl">
+                                            <p class="text-[10px] font-black text-amber-500 uppercase mb-4 tracking-widest flex items-center gap-2"><i data-lucide="alert-triangle"></i> Houve Paradas?</p>
+                                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                                                <div class="space-y-2"><div class="flex justify-between text-[9px] font-bold text-slate-500">Início Parada <button onclick="setNow('stopS')" class="bg-slate-800 px-2 rounded">AGORA</button></div><div class="flex gap-2"><input type="date" value="${state.form.stopStart.date}" oninput="state.form.stopStart.date=this.value; render();" class="bg-slate-950 p-2 rounded flex-1 text-xs" /><input type="time" value="${state.form.stopStart.hour}" oninput="state.form.stopStart.hour=this.value; render();" class="bg-slate-950 p-2 rounded text-xs" /></div></div>
+                                                <div class="space-y-2"><div class="flex justify-between text-[9px] font-bold text-slate-500">Fim Parada <button onclick="setNow('stopE')" class="bg-slate-800 px-2 rounded">AGORA</button></div><div class="flex gap-2"><input type="date" value="${state.form.stopEnd.date}" oninput="state.form.stopEnd.date=this.value; render();" class="bg-slate-950 p-2 rounded flex-1 text-xs" /><input type="time" value="${state.form.stopEnd.hour}" oninput="state.form.stopEnd.hour=this.value; render();" class="bg-slate-950 p-2 rounded text-xs" /></div></div>
+                                            </div>
+                                            <textarea oninput="state.form.stopReason=this.value;" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs h-20 outline-none" placeholder="Motivo da parada..."></textarea>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="lg:col-span-4 flex flex-col">
+                                <div class="bg-slate-900 rounded-[2.5rem] p-8 border border-slate-800 shadow-2xl flex-1 flex flex-col items-center justify-between">
+                                    <div class="text-center w-full">
+                                        <h3 class="text-xs font-black uppercase text-slate-500 tracking-[0.4em] mb-4">Ritmo Efetivo</h3>
+                                        <div class="flex items-baseline justify-center gap-2">
+                                            <span class="text-8xl font-black text-white">${metrics?.rhythm || '0.0'}</span>
+                                            <span class="text-xl font-bold text-slate-600">Ton/h</span>
+                                        </div>
+                                        <div class="space-y-2 mt-8 text-slate-400 text-xs font-bold uppercase">
+                                            <div class="flex justify-between"><span>Tempo Bruto:</span> <span>${metrics?.totalHours || '0.00'}h</span></div>
+                                            <div class="flex justify-between text-amber-500"><span>Paradas (-):</span> <span>${metrics?.stoppageHours || '0.00'}h</span></div>
+                                        </div>
+                                    </div>
+                                    <button onclick="finalizeBeneficiamento()" ${!isReady ? 'disabled opacity-50 cursor-not-allowed' : ''} class="w-full mt-8 py-8 rounded-[2rem] font-black transition-all bg-green-600 hover:bg-green-500 text-white shadow-xl flex flex-col items-center gap-2">
+                                        <i data-lucide="clipboard-check"></i> <span>CONCLUIR E SALVAR</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+                        
+                        <!-- Historico na Aba de Beneficiamento -->
+                        <section class="space-y-6 pt-12">
+                            <h2 class="text-lg font-black uppercase text-slate-500 border-b border-slate-800 pb-4 flex items-center gap-3"><i data-lucide="history"></i> Lotes Concluídos</h2>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                ${state.completedHistory.map(item => `
+                                    <div class="bg-slate-900 rounded-3xl border border-slate-800 overflow-hidden shadow-xl">
+                                        <div class="bg-blue-600 px-6 py-3 flex justify-between items-center font-black uppercase text-xs"><span>${item.name}</span> <span>${item.performance.ritmo} T/h</span></div>
+                                        <div class="p-6 space-y-3">
+                                            <div class="flex justify-between text-[10px] font-bold"><span class="text-slate-500">Cultivar:</span> <span class="text-white">${item.cultivar}</span></div>
+                                            <div class="flex justify-between text-[10px] font-bold"><span class="text-slate-500">Tempo Efetivo:</span> <span class="text-blue-400">${item.performance.effectiveHours}h</span></div>
+                                            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 text-[9px] text-amber-500 italic">Parada: ${item.performance.parada}</div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </section>
+                    </main>
+                </div>
+            `;
+        }
+
+        // --- RENDERIZADOR PRINCIPAL ---
+
+        function render() {
+            const app = document.getElementById('app');
+            if (state.view === 'dashboard') {
+                app.innerHTML = renderHeader() + renderDashboard();
+            } else {
+                app.innerHTML = renderBeneficiamento();
+            }
+            
+            // Re-inicializa os ícones do Lucide após renderizar o HTML
+            lucide.createIcons();
+            
+            // Sincroniza o valor do input de pesquisa se necessário
+            const searchInput = document.getElementById('search-input');
+            if (searchInput) searchInput.value = state.searchTerm;
+        }
+
+        // Inicialização
+        window.onload = render;
+
+    </script>
+
+    <!-- Modal de Erro -->
+    <div id="error-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div class="bg-white rounded-[2rem] shadow-2xl max-w-md w-full overflow-hidden">
+            <div class="bg-red-600 p-6 text-white flex items-center gap-4">
+                <i data-lucide="alert-circle" class="w-8 h-8"></i>
+                <div>
+                    <h3 id="error-title" class="text-xl font-black uppercase tracking-tight">Erro</h3>
+                    <p id="error-silo" class="text-[10px] font-bold opacity-80 uppercase tracking-widest"></p>
+                </div>
+            </div>
+            <div class="p-8 text-center">
+                <p id="error-message" class="text-slate-600 font-medium mb-8"></p>
+                <button onclick="document.getElementById('error-modal').classList.add('hidden')" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs">Entendido</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

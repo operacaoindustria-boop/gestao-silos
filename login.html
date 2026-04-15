@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATTO Sementes | Login</title>
+    <!-- Tailwind CSS para Estilização -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons para Ícones -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-900 text-white flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-slate-800 rounded-[2.5rem] p-8 md:p-12 shadow-2xl max-w-md w-full space-y-8">
+        <div class="text-center">
+            <div class="flex items-center justify-center gap-3 mb-4">
+                <div class="bg-green-600 p-2.5 rounded-2xl shadow-lg shadow-green-100 text-white">
+                    <i data-lucide="sprout"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-black text-white uppercase leading-none">ATTO Sementes</h1>
+                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mt-1">Gestão de Silos • Login</p>
+                </div>
+            </div>
+            <p id="auth-error" class="text-red-400 text-sm font-medium mt-4 hidden"></p>
+        </div>
+
+        <!-- Login Form -->
+        <form id="login-form" class="space-y-6">
+            <div>
+                <label for="login-email" class="text-xs font-black uppercase text-slate-400 block mb-2 tracking-widest">Email</label>
+                <input type="email" id="login-email" placeholder="seu@email.com" required class="w-full bg-slate-900 border-2 border-slate-700 rounded-xl px-5 py-3 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+            </div>
+            <div>
+                <label for="login-password" class="text-xs font-black uppercase text-slate-400 block mb-2 tracking-widest">Senha</label>
+                <input type="password" id="login-password" placeholder="********" required class="w-full bg-slate-900 border-2 border-slate-700 rounded-xl px-5 py-3 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+            </div>
+            <button type="submit" class="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all bg-blue-600 text-white shadow-xl hover:bg-blue-700">Entrar</button>
+        </form>
+
+        <div class="text-center text-slate-400 text-sm">
+            Não tem uma conta? <button type="button" id="show-register" class="text-blue-400 hover:underline font-bold">Cadastre-se</button>
+        </div>
+
+        <!-- Register Form (Initially hidden) -->
+        <form id="register-form" class="space-y-6 hidden">
+            <h2 class="text-xl font-black text-white text-center uppercase tracking-wide">Criar Nova Conta</h2>
+            <div>
+                <label for="register-email" class="text-xs font-black uppercase text-slate-400 block mb-2 tracking-widest">Email</label>
+                <input type="email" id="register-email" placeholder="seu@email.com" required class="w-full bg-slate-900 border-2 border-slate-700 rounded-xl px-5 py-3 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+            </div>
+            <div>
+                <label for="register-password" class="text-xs font-black uppercase text-slate-400 block mb-2 tracking-widest">Senha</label>
+                <input type="password" id="register-password" placeholder="********" required class="w-full bg-slate-900 border-2 border-slate-700 rounded-xl px-5 py-3 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+            </div>
+            <div>
+                <label for="register-confirm-password" class="text-xs font-black uppercase text-slate-400 block mb-2 tracking-widest">Confirmar Senha</label>
+                <input type="password" id="register-confirm-password" placeholder="********" required class="w-full bg-slate-900 border-2 border-slate-700 rounded-xl px-5 py-3 text-white font-bold outline-none focus:border-blue-500 transition-all" />
+            </div>
+            <button type="submit" class="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all bg-green-600 text-white shadow-xl hover:bg-green-700">Cadastrar</button>
+            <div class="text-center text-slate-400 text-sm">
+                Já tem uma conta? <button type="button" id="show-login" class="text-blue-400 hover:underline font-bold">Entrar</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+
+    <script>
+        // Firebase Configuration (a mesma do seu projeto 'integracaocoi')
+        const firebaseConfig = {
+            apiKey: "AIzaSyBe-R_7RcO4q34u9jrR4SXoOtfTppQ25FA",
+            authDomain: "integracaocoi.firebaseapp.com",
+            projectId: "integracaocoi",
+            storageBucket: "integracaocoi.firebasestorage.app",
+            messagingSenderId: "177203745489",
+            appId: "1:177203745489:web:04b0c9af40f3aae3032bf0"
+        };
+
+        // Initialize Firebase
+        const app = firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+
+        const loginForm = document.getElementById('login-form');
+        const registerForm = document.getElementById('register-form');
+        const authError = document.getElementById('auth-error');
+        const showRegisterBtn = document.getElementById('show-register');
+        const showLoginBtn = document.getElementById('show-login');
+
+        // Toggle between login and register forms
+        showRegisterBtn.addEventListener('click', () => {
+            loginForm.classList.add('hidden');
+            registerForm.classList.remove('hidden');
+            authError.classList.add('hidden');
+        });
+
+        showLoginBtn.addEventListener('click', () => {
+            registerForm.classList.add('hidden');
+            loginForm.classList.remove('hidden');
+            authError.classList.add('hidden');
+        });
+
+        // Handle Login
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = loginForm['login-email'].value;
+            const password = loginForm['login-password'].value;
+            authError.classList.add('hidden');
+
+            try {
+                await auth.signInWithEmailAndPassword(email, password);
+                window.location.href = 'index.html'; // Redirect to main app
+            } catch (error) {
+                console.error("Login Error:", error);
+                authError.textContent = getFirebaseErrorMessage(error.code);
+                authError.classList.remove('hidden');
+            }
+        });
+
+        // Handle Registration
+        registerForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = registerForm['register-email'].value;
+            const password = registerForm['register-password'].value;
+            const confirmPassword = registerForm['register-confirm-password'].value;
+            authError.classList.add('hidden');
+
+            if (password !== confirmPassword) {
+                authError.textContent = "As senhas não coincidem.";
+                authError.classList.remove('hidden');
+                return;
+            }
+
+            try {
+                await auth.createUserWithEmailAndPassword(email, password);
+                window.location.href = 'index.html'; // Redirect to main app
+            } catch (error) {
+                console.error("Registration Error:", error);
+                authError.textContent = getFirebaseErrorMessage(error.code);
+                authError.classList.remove('hidden');
+            }
+        });
+
+        // Helper to get user-friendly Firebase error messages
+        function getFirebaseErrorMessage(errorCode) {
+            switch (errorCode) {
+                case 'auth/invalid-email': return 'Email inválido.';
+                case 'auth/user-disabled': return 'Usuário desativado.';
+                case 'auth/user-not-found': return 'Usuário não encontrado.';
+                case 'auth/wrong-password': return 'Senha incorreta.';
+                case 'auth/email-already-in-use': return 'Este email já está em uso.';
+                case 'auth/weak-password': return 'A senha deve ter pelo menos 6 caracteres.';
+                default: return 'Ocorreu um erro de autenticação. Tente novamente.';
+            }
+        }
+
+        // Check if user is already logged in
+        auth.onAuthStateChanged(user => {
+            if (user) {
+                window.location.href = 'index.html'; // Redirect if already authenticated
+            }
+        });
+
+        // Initialize Lucide icons
+        window.onload = () => {
+            lucide.createIcons();
+        };
+    </script>
+</body>
+</html>

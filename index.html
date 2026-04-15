@@ -1,0 +1,1476 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATTO Sementes | Gestão de Silos e Performance</title>
+    <!-- Tailwind CSS para Estilização -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons para Ícones -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Chart.js para Gráficos -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+        
+        body { font-family: 'Inter', sans-serif; }
+
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.95; transform: scale(0.99); }
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            75% { transform: translateX(2px); }
+        }
+        .animate-shake { animation: shake 0.5s infinite; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+
+    <div id="app">
+        <!-- O conteúdo será renderizado dinamicamente pelo JavaScript -->
+    </div>
+
+    <!-- Modal de Erro (já existente, mas será usado para erros do Firebase) -->
+    <!-- Este modal precisa estar fora do #app para ser sempre acessível -->
+    <!-- Firebase SDKs -->
+    <!-- Use a versão mais recente e estável do Firebase. Verifique em https://firebase.google.com/docs/web/setup#available-libraries -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+    <!-- Adicione outros SDKs do Firebase que você precisar, por exemplo: -->
+    <!-- <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script> -->
+    <!-- <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-storage-compat.js"></script> -->
+
+    <script>
+        // --- CONFIGURAÇÃO INICIAL E ESTADO ---
+        // Firebase Configuration (para o seu projeto 'integracaocoi')
+        const firebaseConfig = {
+            apiKey: "AIzaSyBe-R_7RcO4q34u9jrR4SXoOtfTppQ25FA",
+            authDomain: "integracaocoi.firebaseapp.com",
+            projectId: "integracaocoi",
+            storageBucket: "integracaocoi.firebasestorage.app",
+            messagingSenderId: "177203745489",
+            appId: "1:177203745489:web:04b0c9af40f3aae3032bf0"
+        };
+        // Initialize Firebase e obtenha a instância do Firestore
+        const app = firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore(); // Agora 'db' pode ser usado para interagir com o Firestore
+        const auth = firebase.auth(); // Instância do Firebase Authentication
+
+        const FIXED_SILOS = [
+            ...Array.from({ length: 16 }, (_, i) => `PULMÃO ${String(i + 1).padStart(2, '0')}`), // PULMÃO 01 to PULMÃO 16
+            ...Array.from({ length: 4 }, (_, i) => `REPASSE ${String(i + 1).padStart(2, '0')}`) // REPASSE 01 to REPASSE 04
+        ];
+
+        let state = {
+            view: 'dashboard', // dashboard | beneficiamento | managementDashboard
+            selectedSiloId: null,
+            siloMap: {},
+            completedHistory: [],
+            searchTerm: '', // Usado para filtros futuros, se implementado
+            errorMessage: null, // Para exibir erros ao usuário
+            // Estados temporários para a aba de beneficiamento
+            form: {
+                // Adicionei campos de data para as horas, para cálculos mais precisos
+                // e para evitar problemas com horários que cruzam a meia-noite
+                responsible: '',
+                startTime: { date: '', hour: '' },
+                endTime: { date: '', hour: '' },
+                stopStart: { date: '', hour: '' },
+                stopEnd: { date: '', hour: '' },
+                stopReason: ''
+            },
+            confirmation: {
+                show: false,
+                title: '',
+                message: '',
+                icon: 'help-circle',
+                color: 'bg-slate-900',
+                onConfirm: () => {},
+            managementTab: 'global' // Aba ativa no dashboard gerencial
+            }
+        };
+
+        // --- FUNÇÕES DE UTILIDADE ---
+
+        function getSiloCapacity(name) {
+            const num = parseInt(name.match(/\d+/)?.[0]);
+            if (name.includes('REPASSE')) return 72;
+            const silos72 = [1, 8, 9, 16];
+            return silos72.includes(num) ? 72 : 84;
+        }
+
+        function highlightNumbers(text) {
+            if (!text) return '';
+            return text.toString().replace(/(\d+)/g, '<span class="bg-yellow-300 text-slate-900 px-1 rounded font-black shadow-sm mx-0.5 border border-yellow-400">$1</span>');
+        }
+
+        function calculateAutoTons(o1, o2) {
+            const text = `${o1} ${o2}`.toLowerCase();
+            const matches = text.match(/\d+/g);
+            if (matches && (text.includes('secador') || text.includes('sec'))) {
+                const unique = [...new Set(matches)];
+                return unique.length * 12;
+            }
+            return 0;
+        }
+
+        function normalizeSiloName(name) {
+            if (!name) return null;
+            const clean = name.toString().toUpperCase().trim();
+            const numMatch = clean.match(/\d+/);
+            const num = numMatch ? String(numMatch[0]).padStart(2, '0') : null;
+            if (!num) return null;
+            
+            if (clean.includes('R')) return `REPASSE ${num}`;
+            return `PULMÃO ${num}`;
+        }
+
+        function getRhythmColor(rhythm) {
+            const r = parseFloat(rhythm);
+            if (r >= 75) return { text: 'text-green-400', border: 'border-green-500/30', bg: 'bg-green-500/10' };
+            if (r >= 60) return { text: 'text-yellow-400', border: 'border-yellow-500/30', bg: 'bg-yellow-500/10' };
+            return { text: 'text-red-400', border: 'border-red-500/30', bg: 'bg-red-500/10' };
+        }
+
+        function calculateGlobalMetrics() {
+            const history = state.completedHistory;
+            if (history.length === 0) {
+                return {
+                    totalVolume: 0, totalDischarges: 0, averageRhythm: 0, goalAdherence: 0,
+                    dailyVolume: {}, rhythmByCultivar: {}, allRhythms: [], totalStoppageHours: 0
+                };
+            }
+            // New aggregations for Comparative Analysis tab
+            let volumeByCultivar = {};
+            let siloPerformanceSummary = {};
+            // New aggregations for Stoppages, Shift, etc.
+            let stoppageReasons = {};
+            let shiftProduction = { 'Turno A': { volume: 0, count: 0 }, 'Turno B': { volume: 0, count: 0 }, 'Turno C': { volume: 0, count: 0 } };
+            let userProduction = {};
+
+            const RHYTHM_GOAL = 75;
+            let totalVolume = 0;
+            let totalRhythm = 0;
+            let metGoalCount = 0;
+            let totalStoppageHours = 0;
+            const dailyVolume = {};
+            const rhythmByCultivar = {};
+            const allRhythms = [];
+
+            history.forEach(item => {
+                const perf = item.performance;
+                const vol = parseFloat(item.tonelagem) || 0;
+                const rhythm = parseFloat(perf.rhythm) || 0;
+                const stoppage = parseFloat(perf.stoppageHours) || 0;
+                const date = perf.inicio.split(' ')[0];
+                const shift = 'Turno A'; // Placeholder, needs real shift data
+
+                totalVolume += vol;
+                totalRhythm += rhythm;
+                totalStoppageHours += stoppage;
+                if (rhythm >= RHYTHM_GOAL) metGoalCount++;
+
+                // Agrupar por dia
+                dailyVolume[date] = (dailyVolume[date] || 0) + vol;
+
+                // Agrupar por cultivar
+                if (!rhythmByCultivar[item.cultivar]) {
+                    rhythmByCultivar[item.cultivar] = { totalRhythm: 0, count: 0 };
+                }
+                rhythmByCultivar[item.cultivar].totalRhythm += rhythm;
+                rhythmByCultivar[item.cultivar].count++;
+
+                // Agrupar por cultivar (volume)
+                volumeByCultivar[item.cultivar] = (volumeByCultivar[item.cultivar] || 0) + vol;
+
+                // Agrupar por silo (para radar chart)
+                if (!siloPerformanceSummary[item.name]) {
+                    siloPerformanceSummary[item.name] = {
+                        totalVolume: 0, totalRhythm: 0, rhythmCount: 0, totalStoppageHours: 0, totalDischarges: 0
+                    };
+                }
+                siloPerformanceSummary[item.name].totalVolume += vol;
+                siloPerformanceSummary[item.name].totalRhythm += rhythm;
+                siloPerformanceSummary[item.name].rhythmCount++;
+                siloPerformanceSummary[item.name].totalStoppageHours += stoppage;
+                siloPerformanceSummary[item.name].totalDischarges++;
+
+                // Agrupar paradas por motivo
+                if (perf.parada && perf.parada !== 'Nenhuma' && stoppage > 0) {
+                    stoppageReasons[perf.parada] = (stoppageReasons[perf.parada] || 0) + stoppage;
+                }
+
+                // Agrupar produção por turno
+                if (shiftProduction[shift]) {
+                    shiftProduction[shift].volume += vol;
+                    shiftProduction[shift].count++;
+                }
+
+                // Agrupar produção por usuário
+                const user = perf.responsavel || 'Desconhecido';
+                userProduction[user] = (userProduction[user] || 0) + vol;
+
+                allRhythms.push({ x: vol, y: rhythm, silo: item.name });
+            });
+
+            const avgRhythmByCultivar = {};
+            for (const cultivar in rhythmByCultivar) {
+                const data = rhythmByCultivar[cultivar];
+                avgRhythmByCultivar[cultivar] = (data.totalRhythm / data.count).toFixed(2);
+            }
+            
+            const processedSiloPerformance = {};
+            for (const siloName in siloPerformanceSummary) {
+                const data = siloPerformanceSummary[siloName];
+                processedSiloPerformance[siloName] = {
+                    averageRhythm: parseFloat((data.totalRhythm / data.rhythmCount).toFixed(2)),
+                    totalVolume: parseFloat(data.totalVolume.toFixed(2)),
+                    totalStoppageHours: parseFloat(data.totalStoppageHours.toFixed(2)),
+                    totalDischarges: data.totalDischarges
+                };
+            }
+
+            return {
+                totalVolume: totalVolume.toFixed(2),
+                totalDischarges: history.length,
+                averageRhythm: (totalRhythm / history.length).toFixed(2),
+                goalAdherence: ((metGoalCount / history.length) * 100).toFixed(1),
+                totalStoppageHours: totalStoppageHours.toFixed(2),
+                dailyVolume: Object.entries(dailyVolume).sort((a, b) => new Date(a[0]) - new Date(b[0])),
+                rhythmByCultivar: Object.entries(avgRhythmByCultivar).sort((a, b) => b[1] - a[1]), // For Performance Global
+                volumeByCultivar: Object.entries(volumeByCultivar).sort((a, b) => b[1] - a[1]), // For Comparative Analysis
+                stoppageReasons: Object.entries(stoppageReasons).sort((a, b) => b[1] - a[1]), // For Stoppages
+                shiftProduction, // For Shift Production
+                userProduction: Object.entries(userProduction).sort((a, b) => b[1] - a[1]), // For Shift Production
+                siloPerformanceSummary: processedSiloPerformance, // For Comparative Analysis
+                allRhythms,
+                RHYTHM_GOAL
+            };
+        }
+
+
+        // --- LÓGICA DE NEGÓCIO ---
+
+        async function processImport() {
+            const rawData = document.getElementById('raw-data-input').value;
+            if (!rawData.trim()) return;
+
+            const rows = rawData.split('\n');
+            const newSilosFromPaste = {}; // <-- Variável que faltava
+
+            rows.forEach(row => {
+                const col = row.split('\t');
+                if (col.length < 5 || !col[1] || row.toLowerCase().includes('tipo de amostra')) return;
+                
+                const normName = normalizeSiloName(col[1]);
+                if (normName && FIXED_SILOS.includes(normName)) {
+                    const existingSiloData = state.siloMap[normName];
+                    const newDataColeta = col[2] || '-';
+                    const newHoraInicio = col[5] || '-';
+
+                    // Lógica de "inteligência": Detecta se é uma carga nova ou a mesma.
+                    const isNewLoad = !existingSiloData || 
+                                      existingSiloData.dataColeta !== newDataColeta || 
+                                      existingSiloData.horaInicio !== newHoraInicio;
+
+                    const autoTons = calculateAutoTons(col[3], col[4]);
+                    const mixQty = parseInt(col[14]) || 0;
+
+                    const siloDataForUpdate = {
+                        ...existingSiloData, // Começa com os dados existentes para preservar status e performance
+                        tipoAmostra: col[0] || '-', // E atualiza com os dados da planilha
+                        dataColeta: newDataColeta,
+                        origem1: col[3] || '',
+                        origem2: col[4] || '',
+                        horaInicio: newHoraInicio,
+                        respColeta: col[6] || '-',
+                        cultivar: col[9] || '-',
+                        umidade: col[10] || '-',
+                        temp: col[11] || '-',
+                        misturaQtde: mixQty,
+                        misturaCultivar: col[15] || '',
+                        analista: col[17] || '-',
+                        statusLASA: col[18] || 'EM ANÁLISE',
+                        tonelagem: autoTons > 0 ? autoTons : (existingSiloData?.tonelagem || 0),
+                        lastUpdate: new Date().toISOString()
+                    };
+
+                    if (isNewLoad) {
+                        // Se for uma carga nova, reseta o status e a performance.
+                        siloDataForUpdate.statusBeneficiamento = 'Irá Beneficiar';
+                        siloDataForUpdate.performance = null;
+                    }
+                    newSilosFromPaste[normName] = siloDataForUpdate;
+                }
+            });
+
+            const batch = db.batch();
+            for (const name in newSilosFromPaste) {
+                const siloData = newSilosFromPaste[name];
+                const docRef = db.collection('silosQueue').doc(name); // Usar o nome do silo como ID do documento
+                batch.set(docRef, siloData, { merge: true }); // Usa SET com MERGE para garantir que não sobrescreva campos se a lógica falhar
+            }
+
+            try {
+                await batch.commit();
+                document.getElementById('raw-data-input').value = ''; // Limpar input após sucesso
+            } catch (error) {
+                console.error("Erro ao sincronizar silos com Firestore:", error);
+                state.errorMessage = { title: "Erro de Sincronização", message: "Não foi possível sincronizar os dados da planilha com o Firebase." };
+                render();
+            }
+        }
+
+        function updateSiloTonnage(name, inputElement) {
+            const capacity = getSiloCapacity(name);
+            let value = parseFloat(inputElement.value) || 0;
+
+            if (value > capacity) {
+                state.errorMessage = {
+                    title: "Capacidade Excedida",
+                    message: `A capacidade máxima para o ${name} é de ${capacity} toneladas. O valor foi ajustado para o máximo permitido.`,
+                    silo: name
+                };
+                value = capacity; // Ajusta o valor para a capacidade máxima
+                inputElement.value = value; // Atualiza o campo de input visualmente
+                render(); // Mostra o modal de erro
+            }
+
+            db.collection('silosQueue').doc(name).update({ tonelagem: value });
+        }
+        async function updateSiloStatus(name, newStatus) {
+            const data = state.siloMap[name];
+            if (newStatus === 'Em Beneficiamento' && (!data.tonelagem || data.tonelagem <= 0)) {
+                state.errorMessage = {
+                    title: "Silo Vazio",
+                    message: `Informe a tonelagem do ${name} antes de iniciar o beneficiamento.`,
+                    silo: name
+                };
+                render();
+                return;
+            }
+            
+            try {
+                const siloRef = db.collection('silosQueue').doc(name);
+                await siloRef.update({
+                    statusBeneficiamento: newStatus,
+                    lastUpdate: new Date().toISOString()
+                });
+
+                if (newStatus === 'Em Beneficiamento') {
+                    state.selectedSiloId = name;
+                    state.view = 'beneficiamento';
+                    resetForm();
+                    render(); // Renderiza imediatamente para mudar a view, o listener atualizará o siloMap
+                }
+            } catch (error) {
+                console.error(`Erro ao atualizar status do silo ${name}:`, error);
+                state.errorMessage = { title: "Erro ao Atualizar Status", message: `Não foi possível atualizar o status do silo ${name} no Firebase.` };
+                render();
+            }
+        }
+
+        // Function to handle confirmation before updating silo status
+        function confirmStatusChange(name, newStatus) {
+            let title = 'Confirmar Alteração';
+            let message = `Deseja realmente alterar o status do silo <strong>${name}</strong> para <strong>"${newStatus}"</strong>?`;
+            let icon = 'help-circle';
+            let color = 'bg-slate-800';
+
+            const siloData = state.siloMap[name];
+            // Lógica de "virada de chave": checa se o silo já foi beneficiado e tem dados de performance
+            if (newStatus === 'Em Beneficiamento' && siloData?.statusBeneficiamento === 'Beneficiado' && siloData?.performance) {
+                state.confirmation = {
+                    show: true,
+                    title: 'Silo Já Beneficiado',
+                    message: `Este silo já foi processado. Deseja <strong>editar os parâmetros</strong> de descarga existentes?`,
+                    icon: 'edit',
+                    color: 'bg-yellow-500',
+                    onConfirm: () => {
+                        state.selectedSiloId = name;
+                        state.view = 'beneficiamento';
+                        resetForm(siloData.performance); // Preenche o form com dados existentes
+                        render();
+                    }
+                };
+                render();
+                return; // Interrompe o fluxo normal
+            }
+            if (newStatus === 'Em Beneficiamento') {
+                title = 'Iniciar Beneficiamento?';
+                message = `Você será redirecionado para a tela de lançamento de performance do silo <strong>${name}</strong>. Confirma?`;
+                icon = 'play-circle';
+                color = 'bg-blue-600';
+            } else if (newStatus === 'Beneficiado') {
+                title = 'Marcar como Concluído?';
+                message = `O silo <strong>${name}</strong> será marcado como "Concluído". Esta ação não pode ser desfeita facilmente.`;
+                icon = 'check-circle';
+                color = 'bg-slate-500';
+            } else if (newStatus === 'Irá Beneficiar') {
+                title = 'Marcar como Aguardando?';
+                message = `O silo <strong>${name}</strong> voltará para o status "Aguardando".`;
+                icon = 'clock';
+                color = 'bg-amber-500';
+            }
+
+            state.confirmation = {
+                show: true,
+                title, message, icon, color,
+                onConfirm: () => updateSiloStatus(name, newStatus)
+            };
+
+            render();
+        }
+
+        function setNow(field) {
+            const now = new Date();
+            const d = now.toISOString().split('T')[0];
+            const h = now.toTimeString().split(' ')[0].substring(0, 5);
+            
+            if (field === 'start') state.form.startTime = { date: d, hour: h };
+            if (field === 'end') state.form.endTime = { date: d, hour: h };
+            if (field === 'stopS') state.form.stopStart = { date: d, hour: h };
+            if (field === 'stopE') state.form.stopEnd = { date: d, hour: h };
+            updateBeneficiamentoUI(); // Chamada para atualizar apenas a UI de beneficiamento
+        }
+        function resetForm(existingPerformance = null) {
+            if (existingPerformance) {
+                // Preenche o formulário com dados de um beneficiamento existente para edição
+                const [startDate, startHour] = existingPerformance.inicio.split(' ');
+                const [endDate, endHour] = existingPerformance.fim.split(' ');
+                state.form = {
+                    responsible: existingPerformance.responsavel || '',
+                    startTime: { date: startDate, hour: startHour },
+                    endTime: { date: endDate, hour: endHour },
+                    stopStart: { date: '', hour: '' }, // Paradas não são salvas em detalhe, então resetamos
+                    stopEnd: { date: '', hour: '' },
+                    stopReason: existingPerformance.parada === 'Nenhuma' ? '' : existingPerformance.parada,
+                    tonelagem: state.siloMap[state.selectedSiloId]?.performance?.tonelagem || state.siloMap[state.selectedSiloId]?.tonelagem || 0
+                };
+            } else {
+                // Inicia um formulário novo/vazio
+                const selectedSiloTonnage = state.siloMap[state.selectedSiloId]?.tonelagem || 0;
+                state.form = {
+                    responsible: '', startTime: { date: '', hour: '' }, endTime: { date: '', hour: '' },
+                    stopStart: { date: '', hour: '' }, stopEnd: { date: '', hour: '' }, stopReason: '',
+                    tonelagem: selectedSiloTonnage
+                };
+            }
+        }
+        function calculateMetrics() {
+            const f = state.form;
+            if (!f.startTime.date || !f.endTime.date) return null;
+
+            const start = new Date(`${f.startTime.date}T${f.startTime.hour}`);
+            const end = new Date(`${f.endTime.date}T${f.endTime.hour}`);
+            const tons = f.tonelagem || 0; // Usa a tonelagem do formulário
+
+            let totalMs = Math.max(0, end - start); // Garante que não seja negativo
+            const totalHours = totalMs / (1000 * 60 * 60);
+
+            if (totalMs <= 0) return { rhythm: 0, effectiveHours: 0, stoppageHours: 0, totalHours: 0 };
+
+            let stopMs = 0;
+            if (f.stopStart.date && f.stopEnd.date) {
+                const sS = new Date(`${f.stopStart.date}T${f.stopStart.hour}`);
+                const sE = new Date(`${f.stopEnd.date}T${f.stopEnd.hour}`);
+                stopMs = Math.max(0, sE - sS);
+                // Garante que o tempo de parada não exceda o tempo total
+                stopMs = Math.min(stopMs, totalMs);
+            }
+
+            const effectiveMs = totalMs - stopMs;
+            const effectiveHrs = effectiveMs / (1000 * 60 * 60);
+            const rhythm = effectiveHrs > 0 ? (tons / effectiveHrs).toFixed(2) : 0;
+
+            return {
+                rhythm,
+                effectiveHours: effectiveHrs.toFixed(2),
+                stoppageHours: (stopMs / (1000 * 60 * 60)).toFixed(2),
+                totalHours: totalHours.toFixed(2) // Adicionado totalHours
+            };
+        }
+
+        // Nova função para atualizar apenas a UI da tela de beneficiamento
+        function updateBeneficiamentoUI() {
+            if (state.view !== 'beneficiamento') return; // Só atualiza se estiver na view correta
+
+            const metrics = calculateMetrics();
+            const isReady = (state.form.responsible.length > 2 && state.form.startTime.date && state.form.endTime.date && state.form.tonelagem > 0 && metrics?.rhythm > 0); // Adiciona verificação de tonelagem
+
+            // Atualiza os elementos de exibição das métricas
+            const rhythmDisplay = document.getElementById('rhythm-display');
+            const totalHoursDisplay = document.getElementById('total-hours-display');
+            const effectiveHoursDisplay = document.getElementById('effective-hours-display');
+            const stoppageHoursDisplay = document.getElementById('stoppage-hours-display');
+            const rhythmStatusMessage = document.getElementById('rhythm-status-message');
+            const finalizeButton = document.getElementById('finalize-button');
+
+            // Adiciona a atualização dos campos de data/hora que faltava
+            const startDateInput = document.getElementById('start-date-input');
+            const startTimeInput = document.getElementById('start-time-input');
+            const endDateInput = document.getElementById('end-date-input');
+            const endTimeInput = document.getElementById('end-time-input');
+            const stopStartDateInput = document.getElementById('stop-start-date-input');
+            const stopStartTimeInput = document.getElementById('stop-start-time-input');
+            const stopEndDateInput = document.getElementById('stop-end-date-input');
+            const stopEndTimeInput = document.getElementById('stop-end-time-input');
+
+            if (startDateInput) startDateInput.value = state.form.startTime.date;
+            if (startTimeInput) startTimeInput.value = state.form.startTime.hour;
+            if (endDateInput) endDateInput.value = state.form.endTime.date;
+            if (endTimeInput) endTimeInput.value = state.form.endTime.hour;
+            if (stopStartDateInput) stopStartDateInput.value = state.form.stopStart.date;
+            if (stopStartTimeInput) stopStartTimeInput.value = state.form.stopStart.hour;
+            if (stopEndDateInput) stopEndDateInput.value = state.form.stopEnd.date;
+            if (stopEndTimeInput) stopEndTimeInput.value = state.form.stopEnd.hour;
+
+            if (rhythmDisplay) rhythmDisplay.innerText = metrics?.rhythm || '0.0';
+            if (totalHoursDisplay) totalHoursDisplay.innerText = `${metrics?.totalHours || '0.00'}h`;
+            if (effectiveHoursDisplay) effectiveHoursDisplay.innerText = `${metrics?.effectiveHours || '0.00'}h`;
+            if (stoppageHoursDisplay) stoppageHoursDisplay.innerText = `${metrics?.stoppageHours || '0.00'}h`;
+
+            // Lógica para exibir mensagens de status do ritmo
+            let message = '';
+            if (!state.form.startTime.date || !state.form.endTime.date) {
+                message = 'Preencha Início e Fim da Descarga.';
+            } else if (state.form.tonelagem <= 0) {
+                message = 'Informe a Tonelagem Beneficiada.';
+            } else if (metrics?.totalHours <= 0) {
+                message = 'Tempo de descarga inválido.';
+            } else if (metrics?.effectiveHours <= 0 && metrics?.totalHours > 0) {
+                message = 'Tempo efetivo de descarga é zero (parada total).';
+            }
+
+            if (rhythmStatusMessage) {
+                rhythmStatusMessage.innerText = message;
+                rhythmStatusMessage.classList.toggle('hidden', !message);
+            }
+            // Atualiza o estado do botão "CONCLUIR E SALVAR"
+            if (finalizeButton) {
+                finalizeButton.disabled = !isReady;
+                finalizeButton.classList.toggle('opacity-50', !isReady);
+                finalizeButton.classList.toggle('cursor-not-allowed', !isReady);
+            }
+        }
+        async function finalizeBeneficiamento() {
+            const metrics = calculateMetrics();
+            const silo = state.selectedSiloId;
+            
+            const perfData = {
+                ...metrics,
+                responsavel: state.form.responsible,
+                parada: state.form.stopReason || 'Nenhuma',
+                inicio: `${state.form.startTime.date} ${state.form.startTime.hour}`,
+                fim: `${state.form.endTime.date} ${state.form.endTime.hour}`,
+                timestamp: new Date().getTime() // Adicionar timestamp para ordenação
+            };
+
+            const batch = db.batch();
+
+            // 1. Atualizar o silo na coleção silosQueue
+            const siloRef = db.collection('silosQueue').doc(silo);
+            batch.update(siloRef, {
+                statusBeneficiamento: 'Beneficiado',
+                // Adiciona a tonelagem ao objeto de performance para consistência na edição
+                performance: { ...perfData, tonelagem: state.form.tonelagem },
+                lastUpdate: new Date().toISOString()
+            });
+
+            // 2. Adicionar o registro à coleção beneficiamentoRecords
+            const recordRef = db.collection('beneficiamentoRecords').doc(); // ID auto-gerado pelo Firestore
+            batch.set(recordRef, {
+                id: recordRef.id, // Armazenar o ID do Firestore dentro do documento
+                name: silo,
+                cultivar: state.siloMap[silo].cultivar,
+                tonelagem: state.form.tonelagem, // Usa a tonelagem do formulário para o registro
+                umidade: state.siloMap[silo].umidade,
+                performance: perfData,
+                timestamp: perfData.timestamp
+            });
+
+            try {
+                await batch.commit();
+                state.view = 'dashboard';
+                state.selectedSiloId = null;
+            } catch (error) {
+                console.error(`Erro ao finalizar beneficiamento para o silo ${silo}:`, error);
+                state.errorMessage = { title: "Erro ao Finalizar", message: `Não foi possível finalizar o beneficiamento do silo ${silo} no Firebase.` };
+                render();
+            }
+        }
+
+        async function deleteBeneficiamentoRecord(recordId, siloName) {
+            state.confirmation = {
+                show: true,
+                title: 'Confirmar Exclusão',
+                message: 'Deseja realmente excluir este registro de beneficiamento? Esta ação não pode ser desfeita.',
+                icon: 'trash-2',
+                color: 'bg-red-600',
+                onConfirm: async () => {
+                    const batch = db.batch();
+                    // 1. Deletar o registro do histórico
+                    const recordRef = db.collection('beneficiamentoRecords').doc(recordId);
+                    batch.delete(recordRef);
+
+                    // 2. Atualizar o silo na fila de trabalho para 'Irá Beneficiar' e limpar performance
+                    const siloRef = db.collection('silosQueue').doc(siloName);
+                    batch.update(siloRef, { statusBeneficiamento: 'Irá Beneficiar', performance: null });
+
+                    try {
+                        await batch.commit();
+                    } catch (error) {
+                        console.error("Erro ao excluir registro de beneficiamento:", error);
+                        state.errorMessage = { title: "Erro de Exclusão", message: "Não foi possível excluir o registro de beneficiamento." };
+                        render();
+                    }
+                }
+            };
+            render();
+        }
+        // --- COMPONENTES DE INTERFACE ---
+
+        function renderHeader() {
+            const active = Object.values(state.siloMap).length;
+            const done = state.completedHistory.length;
+            return `
+                <header class="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-md">
+                    <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-green-600 p-2.5 rounded-2xl shadow-lg shadow-green-100 text-white">
+                                <i data-lucide="sprout"></i>
+                            </div>
+                            <div>
+                                <h1 class="text-2xl font-black text-slate-900 uppercase leading-none">ATTO Sementes</h1>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mt-1">Silos Pulmão • Controle Técnico</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <div class="bg-slate-50 px-5 py-2.5 rounded-2xl border border-slate-200 flex items-center gap-8 shadow-inner">
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-black uppercase mb-1">Cargas</p>
+                                    <p class="text-xl font-black">${active}</p>
+                                </div>
+                                <div class="w-[1px] h-10 bg-slate-200"></div>
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-black mb-1">Concluídos</p>
+                                    <p class="text-xl font-black text-blue-600">${done}</p>
+                                </div>
+                            </div>
+                            <button onclick="state.view='beneficiamento'; state.selectedSiloId=null; render();" class="p-3 text-slate-500 hover:bg-slate-50 rounded-2xl transition-all border border-transparent hover:border-slate-100" title="Ver Histórico de Beneficiamento">
+                                <i data-lucide="history"></i>
+                            </button>
+                            <button onclick="state.view='managementDashboard'; render();" class="p-3 text-slate-500 hover:bg-slate-50 rounded-2xl transition-all border border-transparent hover:border-slate-100" title="Dashboard de Gestão">
+                                <i data-lucide="layout-dashboard"></i>
+                            </button>
+                            <button onclick="state.siloMap={}; state.completedHistory=[]; render();" class="p-3 text-red-500 hover:bg-red-50 rounded-2xl transition-all border border-transparent hover:border-red-100">
+                                <i data-lucide="trash-2"></i>
+                            </button>
+                            <button onclick="auth.signOut();" class="p-3 text-slate-500 hover:bg-slate-50 rounded-2xl transition-all border border-transparent hover:border-slate-100">
+                                <i data-lucide="log-out"></i>
+                            </button>
+                        </div>
+                    </div>
+                </header>
+            `;
+        }
+
+        function renderDashboard() {
+            return `
+                <main class="max-w-7xl mx-auto p-4 md:p-8 space-y-8">
+                    <!-- Import Section -->
+                    <section class="bg-white rounded-[2.5rem] shadow-xl border border-slate-200 overflow-hidden">
+                        <div class="bg-slate-900 p-5 flex items-center justify-between text-white">
+                            <div class="flex items-center gap-3">
+                                <div class="bg-green-500/20 p-2 rounded-xl border border-green-500/30 text-green-400">
+                                    <i data-lucide="clipboard-paste"></i>
+                                </div>
+                                <h2 class="text-sm font-black uppercase tracking-widest">Sincronizar Planilha VOC</h2>
+                            </div>
+                        </div>
+                        <div class="p-8 space-y-5">
+                            <textarea id="raw-data-input" class="w-full h-28 p-5 rounded-[1.5rem] border-2 border-slate-100 focus:border-blue-500 outline-none transition-all font-mono text-[11px] bg-slate-50 text-slate-600" placeholder="Cole os dados aqui..."></textarea>
+                            <button onclick="processImport()" class="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all bg-blue-600 text-white shadow-xl hover:bg-blue-700">Atualizar Monitoramento</button>
+                        </div>
+                    </section>
+
+                    <!-- Silos Grid -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+                        ${FIXED_SILOS.map(name => renderSiloCard(name)).join('')}
+                    </div>
+                </main>
+            `;
+        }
+
+        function renderSiloCard(name) {
+            const data = state.siloMap[name];
+            if (!data) {
+                return `
+                    <div class="rounded-[2.5rem] border-2 border-dashed border-slate-200 opacity-40 flex flex-col items-center justify-center py-12 space-y-4">
+                        <div class="p-4 bg-slate-200 rounded-full text-slate-500"><i data-lucide="warehouse"></i></div>
+                        <p class="text-[10px] font-black uppercase tracking-widest">${name}</p>
+                    </div>
+                `;
+            }
+
+            const isDone = data.statusBeneficiamento === 'Beneficiado';
+            const isActive = data.statusBeneficiamento === 'Em Beneficiamento';
+            const capacity = getSiloCapacity(name);
+            const occupancy = (data.tonelagem / capacity) * 100;
+            const humVal = parseFloat(data.umidade.replace(',', '.'));
+            const humClass = (!isNaN(humVal) && humVal >= 12 && humVal <= 13) ? "bg-green-100 border-green-300 text-green-700" : "bg-red-100 border-red-300 text-red-700";
+            const isLasaAlert = data.statusLASA.toUpperCase().includes('LASA') || data.statusLASA.toUpperCase().includes('REPROVADO');
+
+            return `
+                <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white border-slate-200 shadow-xl ${isDone ? 'opacity-60' : ''} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
+                    <div class="px-6 py-4 flex justify-between items-center rounded-t-[2.3rem] ${isDone ? 'bg-slate-400' : (isActive ? 'bg-blue-600' : 'bg-slate-900')} text-white">
+                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${name}</span></div>
+                        <span class="text-[10px] font-black">${capacity}T</span>
+                    </div>
+
+                    <div class="p-6 space-y-5 flex-1 flex flex-col">
+                        <div class="space-y-1">
+                            <div class="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                                <button
+                                    onclick="confirmStatusChange('${name}', 'Irá Beneficiar')"
+                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Irá Beneficiar' ? 'bg-amber-400 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
+                                    Aguardando
+                                </button>
+                                <button
+                                    onclick="confirmStatusChange('${name}', 'Em Beneficiamento')"
+                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Em Beneficiamento' ? 'bg-blue-600 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
+                                    Beneficiar
+                                </button>
+                                <button
+                                    onclick="confirmStatusChange('${name}', 'Beneficiado')"
+                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Beneficiado' ? 'bg-slate-400 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
+                                    Concluído
+                                </button>
+                            </div>
+                        </div>
+
+                        ${data.misturaQtde > 0 ? `
+                            <div class="p-3 rounded-2xl border-2 flex flex-col gap-1 ${data.misturaQtde > 5 ? 'bg-red-600 text-white border-red-700 animate-pulse' : 'bg-amber-100 border-amber-300 text-amber-800'}">
+                                <div class="flex items-center gap-2 text-[10px] font-black uppercase"><i data-lucide="shield-alert" class="w-4 h-4"></i> Mistura: ${data.misturaCultivar}</div>
+                            </div>
+                        ` : ''}
+
+                        <div class="bg-slate-50 p-3 rounded-2xl border border-slate-200 flex flex-col gap-1 shadow-sm">
+                            <span class="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5 leading-none"><i data-lucide="calendar" class="w-3 h-3 text-blue-600"></i> Carregamento</span>
+                            <div class="flex items-center justify-between font-black text-slate-800 text-[11px]">
+                                <span>${data.dataColeta}</span>
+                                <div class="h-3 w-[1px] bg-slate-300"></div>
+                                <span>${data.horaInicio}</span>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-between items-center bg-white border border-slate-200 p-2 rounded-xl shadow-sm">
+                            <span class="text-[9px] font-black text-slate-400 uppercase">Tonelagem:</span>
+                            <div class="flex items-center gap-1 px-2 py-0.5 rounded-lg border ${!data.tonelagem || data.tonelagem <= 0 ? 'bg-red-50 border-red-300 animate-shake' : 'bg-slate-50 border-slate-200'}">
+                                <input type="number" value="${data.tonelagem}" 
+                                       onchange="updateSiloTonnage('${name}', this)" 
+                                       class="bg-transparent text-sm font-black w-10 outline-none text-right placeholder:text-red-300" 
+                                       placeholder="0"
+                                />
+                                <span class="text-[10px] font-bold text-slate-400 uppercase">T</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <p class="text-[9px] font-black text-slate-400 uppercase mb-1 leading-none">Cultivar</p>
+                            <h4 class="text-sm font-black text-slate-900 leading-tight">${data.cultivar}</h4>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="p-3 rounded-2xl border-2 flex flex-col shadow-sm ${humClass}">
+                                <span class="text-[9px] font-black uppercase mb-1 flex items-center gap-1"><i data-lucide="droplets" class="w-3 h-3"></i> Umid.</span>
+                                <span class="text-lg font-black">${data.umidade}%</span>
+                            </div>
+                            <div class="bg-slate-50 border-2 border-slate-100 p-3 rounded-2xl flex flex-col shadow-sm">
+                                <span class="text-[9px] font-black text-slate-400 uppercase mb-1 flex items-center gap-1"><i data-lucide="thermometer" class="w-3 h-3"></i> Temp.</span>
+                                <span class="text-lg font-black text-slate-800">${data.temp}°C</span>
+                            </div>
+                        </div>
+
+                        ${data.performance ? `
+                            <div class="bg-blue-600 text-white p-3 rounded-2xl space-y-2 shadow-lg">
+                                <div class="flex items-center justify-between border-b border-white/20 pb-1.5">
+                                    <span class="text-[8px] font-black uppercase opacity-70">Performance</span>
+                                    <span class="text-md font-black">${data.performance.ritmo} T/h</span>
+                                </div>
+                                <div class="flex items-center gap-2"><i data-lucide="user-check" class="w-3 h-3 text-blue-200"></i><span class="text-[9px] font-bold uppercase truncate">${data.performance.responsavel}</span></div>
+                            </div>
+                        ` : ''}
+
+                        <div class="bg-slate-900 p-4 rounded-3xl space-y-3 shadow-lg mt-auto">
+                            <div class="flex flex-col">
+                                <span class="text-[9px] font-black text-slate-500 uppercase mb-1.5 tracking-widest leading-none">Origem:</span>
+                                <div class="text-[11px] text-white font-bold bg-slate-800/40 p-2 rounded-xl border border-slate-700">
+                                    <div class="mb-1">${highlightNumbers(data.origem2)}</div>
+                                    <div class="text-[10px] text-slate-400 font-medium italic border-t border-slate-700/50 pt-1">${highlightNumbers(data.origem1)}</div>
+                                </div>
+                            </div>
+                            <div class="flex flex-col border-t border-slate-800 pt-2 text-green-400">
+                                <span class="text-[9px] font-black text-slate-500 uppercase mb-1 flex items-center gap-2 leading-none"><i data-lucide="hard-hat" class="w-3 h-3 text-amber-500"></i> Operador Carga:</span>
+                                <span class="text-[11px] font-black uppercase truncate">${data.respColeta}</span>
+                            </div>
+                        </div>
+
+                        <div class="p-2.5 rounded-xl border-2 text-center flex flex-col gap-1 transition-colors ${isLasaAlert ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'}">
+                            <span class="text-[8px] font-black text-slate-400 uppercase leading-none">Qualidade (LASA)</span>
+                            <span class="text-xs font-black uppercase tracking-tighter">${data.statusLASA}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderBeneficiamento() {
+            const siloId = state.selectedSiloId;
+            const data = siloId ? state.siloMap[siloId] : null;
+            const metrics = calculateMetrics();
+            const isReady = (state.form.responsible.length > 2 && state.form.startTime.date && state.form.endTime.date && metrics?.rhythm > 0);
+
+            return `
+                <div class="min-h-screen bg-slate-950 font-sans text-white p-4 md:p-8 flex flex-col">
+                    <header class="max-w-7xl mx-auto w-full mb-8 flex items-center justify-between border-b border-slate-800 pb-6">
+                        <button onclick="state.view='dashboard'; state.selectedSiloId=null; render();" class="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 px-4 py-2 rounded-xl font-bold text-sm border border-slate-800 text-slate-400" title="Voltar ao Painel Geral">
+                            <i data-lucide="arrow-left" class="w-4 h-4"></i> Painel Geral
+                        </button>
+                        <h1 class="text-2xl font-black uppercase text-green-400 tracking-widest">Linha de Beneficiamento</h1>
+                        ${siloId ? `
+                            <div class="bg-green-500/10 text-green-400 border border-green-500/20 px-6 py-2 rounded-2xl flex items-center gap-3">
+                                <i data-lucide="play-circle" class="animate-pulse w-5 h-5"></i>
+                                <span class="font-black text-lg uppercase">${siloId}</span>
+                            </div>
+                        ` : `<div class="w-48 text-right"><i data-lucide="history" class="inline-block text-slate-600"></i></div>`}
+                    </header>
+
+                    <main class="max-w-7xl mx-auto w-full space-y-12">
+                        <section class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                            <div class="lg:col-span-8 space-y-8">
+                                <div class="bg-slate-900 rounded-[2.5rem] p-8 border-2 border-slate-800 shadow-2xl">
+                                    <div class="space-y-6">
+                                        <div>
+                                            <label class="text-[11px] font-black uppercase text-slate-400 block mb-2 tracking-widest">Responsável</label>
+                                            <input type="text" value="${state.form.responsible}" oninput="state.form.responsible = this.value; updateBeneficiamentoUI();" placeholder="Nome completo..." class="w-full bg-slate-950 border-2 border-slate-800 rounded-2xl px-6 py-4 text-white font-bold outline-none focus:border-blue-500 transition-all" ${!siloId ? 'disabled' : ''} />
+                                        </div>
+                                        <div>
+                                            <label class="text-[11px] font-black uppercase text-slate-400 block mb-2 tracking-widest">Tonelagem Beneficiada</label>
+                                            <input type="number" value="${state.form.tonelagem}" oninput="state.form.tonelagem = parseFloat(this.value) || 0; updateBeneficiamentoUI();" placeholder="0" class="w-full bg-slate-950 border-2 border-slate-800 rounded-2xl px-6 py-4 text-white font-bold outline-none focus:border-blue-500 transition-all" ${!siloId ? 'disabled' : ''} />
+                                        </div>
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                            <div class="bg-slate-950/40 p-6 rounded-3xl border border-slate-800">
+                                                <div class="flex justify-between items-center mb-4 text-[10px] font-black uppercase text-slate-500">Início Descarga <button onclick="setNow('start')" class="bg-blue-600 text-white px-3 py-1 rounded-md text-[9px] font-bold" ${!siloId ? 'disabled' : ''}>AGORA</button></div>
+                                                <div class="flex gap-2"><input id="start-date-input" type="date" value="${state.form.startTime.date}" oninput="state.form.startTime.date = this.value; updateBeneficiamentoUI();" class="bg-slate-900 rounded-xl p-3 flex-1 text-xs" ${!siloId ? 'disabled' : ''} /><input id="start-time-input" type="time" value="${state.form.startTime.hour}" oninput="state.form.startTime.hour = this.value; updateBeneficiamentoUI();" class="bg-slate-900 rounded-xl p-3 text-xs" ${!siloId ? 'disabled' : ''} /></div>
+                                            </div>
+                                            <div class="bg-slate-950/40 p-6 rounded-3xl border border-slate-800">
+                                                <div class="flex justify-between items-center mb-4 text-[10px] font-black uppercase text-slate-500">Fim Descarga <button onclick="setNow('end')" class="bg-green-600 text-white px-3 py-1 rounded-md text-[9px] font-bold" ${!siloId ? 'disabled' : ''}>AGORA</button></div>
+                                                <div class="flex gap-2"><input id="end-date-input" type="date" value="${state.form.endTime.date}" oninput="state.form.endTime.date = this.value; updateBeneficiamentoUI();" class="bg-slate-900 rounded-xl p-3 flex-1 text-xs" ${!siloId ? 'disabled' : ''} /><input id="end-time-input" type="time" value="${state.form.endTime.hour}" oninput="state.form.endTime.hour = this.value; updateBeneficiamentoUI();" class="bg-slate-900 rounded-xl p-3 text-xs" ${!siloId ? 'disabled' : ''} /></div>
+                                            </div>
+                                        </div>
+                                        <div class="bg-slate-900 rounded-[2rem] p-6 border border-amber-500/20 shadow-xl">
+                                            <p class="text-[10px] font-black text-amber-500 uppercase mb-4 tracking-widest flex items-center gap-2"><i data-lucide="alert-triangle"></i> Houve Paradas?</p>
+                                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                                                <div class="space-y-2"><div class="flex justify-between text-[9px] font-bold text-slate-500">Início Parada <button onclick="setNow('stopS')" class="bg-slate-800 px-2 py-1 rounded-md text-[9px] font-bold" ${!siloId ? 'disabled' : ''}>AGORA</button></div><div class="flex gap-2"><input id="stop-start-date-input" type="date" value="${state.form.stopStart.date}" oninput="state.form.stopStart.date=this.value; updateBeneficiamentoUI();" class="bg-slate-950 p-2 rounded-xl flex-1 text-xs" ${!siloId ? 'disabled' : ''} /><input id="stop-start-time-input" type="time" value="${state.form.stopStart.hour}" oninput="state.form.stopStart.hour=this.value; updateBeneficiamentoUI();" class="bg-slate-950 p-2 rounded-xl text-xs" ${!siloId ? 'disabled' : ''} /></div></div>
+                                                <div class="space-y-2"><div class="flex justify-between text-[9px] font-bold text-slate-500">Fim Parada <button onclick="setNow('stopE')" class="bg-slate-800 px-2 py-1 rounded-md text-[9px] font-bold" ${!siloId ? 'disabled' : ''}>AGORA</button></div><div class="flex gap-2"><input id="stop-end-date-input" type="date" value="${state.form.stopEnd.date}" oninput="state.form.stopEnd.date=this.value; updateBeneficiamentoUI();" class="bg-slate-950 p-2 rounded-xl flex-1 text-xs" ${!siloId ? 'disabled' : ''} /><input id="stop-end-time-input" type="time" value="${state.form.stopEnd.hour}" oninput="state.form.stopEnd.hour=this.value; updateBeneficiamentoUI();" class="bg-slate-950 p-2 rounded-xl text-xs" ${!siloId ? 'disabled' : ''} /></div></div>
+                                            </div>
+                                            <textarea oninput="state.form.stopReason=this.value; updateBeneficiamentoUI();" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs h-20 outline-none" placeholder="Motivo da parada..." ${!siloId ? 'disabled' : ''}></textarea>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="lg:col-span-4 flex flex-col">
+                                <div class="bg-slate-900 rounded-[2.5rem] p-8 border-2 border-slate-800 shadow-2xl flex-1 flex flex-col items-center justify-between">
+                                    <div class="text-center w-full">
+                                        <h3 class="text-xs font-black uppercase text-slate-500 tracking-[0.4em] mb-4">Ritmo Efetivo</h3>
+                                        <div class="flex flex-col items-center justify-center gap-2">
+                                            <span id="rhythm-display" class="text-8xl font-black text-white">${metrics?.rhythm || '0.0'}</span>
+                                            <span class="text-xl font-bold text-slate-600">Ton/h</span>
+                                            <p id="rhythm-status-message" class="text-sm text-red-400 mt-2 hidden"></p>
+                                        </div>
+                                        <div class="space-y-2 mt-8 text-slate-400 text-xs font-bold uppercase">
+                                            <div class="flex justify-between"><span>Tempo Bruto:</span> <span id="total-hours-display">${metrics?.totalHours || '0.00'}h</span></div>
+                                            <div class="flex justify-between"><span>Tempo Efetivo:</span> <span id="effective-hours-display" class="text-blue-400">${metrics?.effectiveHours || '0.00'}h</span></div>
+                                            <div class="flex justify-between text-amber-500"><span>Paradas (-):</span> <span id="stoppage-hours-display">${metrics?.stoppageHours || '0.00'}h</span></div>
+                                        </div>
+                                    </div>
+                                    <button id="finalize-button" onclick="finalizeBeneficiamento()" ${!isReady || !siloId ? 'disabled opacity-50 cursor-not-allowed' : ''} class="w-full mt-8 py-8 rounded-[2rem] font-black transition-all bg-green-600 hover:bg-green-500 text-white shadow-xl flex flex-col items-center gap-2">
+                                        <i data-lucide="clipboard-check" class="w-6 h-6"></i> <span>CONCLUIR E SALVAR</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+                        
+                        <!-- Historico na Aba de Beneficiamento -->
+                        <section class="space-y-6 pt-12">
+                            <h2 class="text-lg font-black uppercase text-slate-500 border-b border-slate-800 pb-4 flex items-center gap-3"><i data-lucide="history"></i> Lotes Concluídos</h2>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                ${state.completedHistory.map(item => {
+                                    const perf = item.performance;
+                                    const rhythmColor = getRhythmColor(perf.rhythm);
+                                    const [startDate, startTime] = perf.inicio.split(' ');
+                                    const [endDate, endTime] = perf.fim.split(' ');
+
+                                    return `
+                                    <div class="bg-slate-900 rounded-3xl border border-slate-800 shadow-xl flex flex-col">
+                                        <div class="px-6 py-3 flex justify-between items-center font-black uppercase text-xs border-b border-slate-800">
+                                            <span class="text-white">${item.name}</span> 
+                                            <button onclick="deleteBeneficiamentoRecord('${item.id}', '${item.name}')" class="text-red-400 hover:text-red-500 p-1 rounded-md transition-colors">
+                                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                            </button>
+                                            <span class="text-slate-400">${item.cultivar}</span>
+                                        </div>
+                                        <div class="p-6 space-y-4 flex-1 flex flex-col">
+                                            <div class="text-center p-4 rounded-2xl border ${rhythmColor.border} ${rhythmColor.bg}">
+                                                <div class="flex items-baseline justify-center gap-2 ${rhythmColor.text}">
+                                                    <span class="text-4xl font-black">${perf.rhythm}</span>
+                                                    <span class="text-sm font-bold">Ton/h</span>
+                                                </div>
+                                            </div>
+                                            <div class="text-[10px] font-bold space-y-2 text-slate-300">
+                                                <div class="flex justify-between"><span>Início:</span> <span>${startDate} às ${startTime}</span></div>
+                                                <div class="flex justify-between"><span>Fim:</span> <span>${endDate} às ${endTime}</span></div>
+                                                <div class="flex justify-between border-t border-slate-800 pt-2 mt-2"><span>Tempo Bruto:</span> <span>${perf.totalHours}h</span></div>
+                                                <div class="flex justify-between text-amber-400"><span>Paradas:</span> <span>${perf.stoppageHours}h</span></div>
+                                            </div>
+                                            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 text-[9px] text-amber-400 italic mt-auto">
+                                                <p class="truncate">Motivo: ${perf.parada}</p>
+                                            </div>
+                                            <div class="text-center text-[9px] font-bold text-slate-500 uppercase pt-2 border-t border-slate-800">Responsável: <span class="text-slate-300">${perf.responsavel}</span></div>
+                                        </div>
+                                    </div>
+                                `}).join('')}
+                            </div>
+                        </section>
+                    </main>
+                </div>
+            `;
+        }
+
+        function renderGlobalPerformanceTab() {            
+            const metrics = calculateGlobalMetrics();
+            const kpis = [
+                { label: 'Ritmo Médio', value: `${metrics.averageRhythm} <span class="text-base ml-1">T/h</span>`, color: 'border-blue-500' },
+                { label: 'Volume Total', value: `${metrics.totalVolume} <span class="text-base ml-1">T</span>`, color: 'border-indigo-500' },
+                { label: 'Descargas', value: metrics.totalDischarges, color: 'border-teal-500' },
+                { label: 'Aderência à Meta', value: `${metrics.goalAdherence}%`, color: 'border-green-500' }
+            ];
+
+            return `
+                <div class="space-y-10">
+                    <!-- KPI Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                        ${kpis.map(kpi => `
+                            <div class="bg-white p-6 rounded-xl border ${kpi.color} border-l-4 shadow-sm">
+                                <div>
+                                    <p class="text-xs font-bold text-slate-500 uppercase">${kpi.label}</p>
+                                    <h3 class="text-3xl font-bold text-slate-900 mt-1">${kpi.value}</h3>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    <!-- Charts Grid -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Volume Diário & Tendência</h3>
+                            <canvas id="daily-volume-chart"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Eficiência Média (Aderência)</h3>
+                            <canvas id="efficiency-gauge-chart"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Ritmo Médio por Produto</h3>
+                            <canvas id="rhythm-by-product-chart"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Dispersão de Performance (Ritmo vs. Peso)</h3>
+                            <canvas id="performance-scatter-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- History Table -->
+                    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                        <h3 class="text-sm font-bold text-slate-700 mb-4">Histórico de Operações</h3>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs">
+                                <thead class="text-slate-500 uppercase tracking-wider">
+                                    <tr>
+                                        <th class="p-3">Data</th>
+                                        <th class="p-3">Silo</th>
+                                        <th class="p-3">Produto</th>
+                                        <th class="p-3">Umidade</th>
+                                        <th class="p-3">Duração</th>
+                                        <th class="p-3">Peso</th>
+                                        <th class="p-3">Ritmo</th>
+                                        <th class="p-3"></th>
+                                    </tr>
+                                </thead>
+                                <tbody class="text-slate-700 font-semibold">
+                                    ${state.completedHistory.map(item => `
+                                        <tr class="border-t border-slate-200 hover:bg-slate-50">
+                                            <td class="p-3">${item.performance.inicio.split(' ')[0]}</td>
+                                            <td class="p-3">${item.name}</td>
+                                            <td class="p-3">${item.cultivar}</td>
+                                            <td class="p-3">${item.umidade}%</td>
+                                            <td class="p-3">${item.performance.totalHours}h</td>
+                                            <td class="p-3">${item.tonelagem} T</td>
+                                            <td class="p-3 font-black ${getRhythmColor(item.performance.rhythm).text}">${item.performance.rhythm} T/h</td>
+                                            <td class="p-3 text-right">
+                                                <button onclick="deleteBeneficiamentoRecord('${item.id}', '${item.name}')" class="text-red-500 hover:text-red-400 p-1">
+                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Global chart instances to keep track for destruction (for Comparative Analysis tab)
+        let siloComparisonRadarChartInstance = null;
+        let volumeByProductChartInstance = null;
+
+        function renderGlobalCharts() {
+            const metrics = calculateGlobalMetrics();
+            const baseChartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { labels: { color: '#475569' } } },
+                scales: { 
+                    y: { ticks: { color: '#64748b' }, grid: { color: '#e2e8f0' } },
+                    x: { ticks: { color: '#64748b' }, grid: { color: '#e2e8f0' } }
+                }
+            };
+
+            // Centralized chart destruction
+            [
+                dailyVolumeChartInstance, efficiencyGaugeChartInstance, rhythmByProductChartInstance, 
+                performanceScatterChartInstance, siloComparisonRadarChartInstance, volumeByProductChartInstance
+            ].forEach(chart => {
+                if (chart) chart.destroy();
+            });
+            dailyVolumeChartInstance = efficiencyGaugeChartInstance = rhythmByProductChartInstance = null;
+            performanceScatterChartInstance = siloComparisonRadarChartInstance = volumeByProductChartInstance = null;
+
+            if (state.view !== 'managementDashboard' || state.managementTab !== 'global') return;
+
+            // Daily Volume Chart
+            const dailyVolumeCtx = document.getElementById('daily-volume-chart')?.getContext('2d');
+            if (dailyVolumeCtx) dailyVolumeChartInstance = new Chart(dailyVolumeCtx, {
+                type: 'bar',
+                data: {
+                    labels: metrics.dailyVolume.map(d => d[0]),
+                    datasets: [{
+                        label: 'Volume (Ton)',
+                        data: metrics.dailyVolume.map(d => d[1]),
+                        backgroundColor: 'rgba(59, 130, 246, 0.5)',
+                        borderColor: 'rgba(59, 130, 246, 0.8)',
+                        borderWidth: 1
+                    }]
+                },
+                options: baseChartOptions
+            });
+
+            // Efficiency Gauge
+            const efficiencyCtx = document.getElementById('efficiency-gauge-chart')?.getContext('2d');
+            if (efficiencyCtx) efficiencyGaugeChartInstance = new Chart(efficiencyCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Atingido', 'Restante'],
+                    datasets: [{
+                        data: [metrics.goalAdherence, 100 - metrics.goalAdherence],
+                        backgroundColor: ['#16a34a', '#e2e8f0'],
+                        borderColor: ['#16a34a', '#e2e8f0'],
+                        borderWidth: 1,
+                        circumference: 180,
+                        rotation: 270,
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { display: false } } }
+            });
+
+            // Rhythm by Product
+            const rhythmByProductCtx = document.getElementById('rhythm-by-product-chart')?.getContext('2d');
+            if (rhythmByProductCtx) rhythmByProductChartInstance = new Chart(rhythmByProductCtx, {
+                type: 'bar',
+                data: {
+                    labels: metrics.rhythmByCultivar.map(c => c[0]),
+                    datasets: [{
+                        label: 'Ritmo Médio (Ton/h)',
+                        data: metrics.rhythmByCultivar.map(c => c[1]),
+                        backgroundColor: 'rgba(16, 185, 129, 0.5)',
+                        borderColor: 'rgba(16, 185, 129, 0.8)',
+                        borderWidth: 1
+                    }]
+                },
+                options: { ...baseChartOptions, indexAxis: 'y' }
+            });
+
+            // Performance Scatter
+            const scatterCtx = document.getElementById('performance-scatter-chart')?.getContext('2d');
+            if (scatterCtx) performanceScatterChartInstance = new Chart(scatterCtx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: 'Descargas',
+                        data: metrics.allRhythms,
+                        backgroundColor: 'rgba(139, 92, 246, 0.5)'
+                    }]
+                },
+                options: baseChartOptions
+            });
+        }
+
+        function renderComparativeAnalysisTab() {
+            return `
+                <div class="space-y-10">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Comparativo de Silos (Radar)</h3>
+                            <canvas id="silo-comparison-radar-chart"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-slate-700 mb-4">Distribuição de Volume por Produto</h3>
+                            <canvas id="volume-by-product-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderComparativeCharts() {
+            const metrics = calculateGlobalMetrics();
+
+            // Centralized chart destruction
+            [
+                dailyVolumeChartInstance, efficiencyGaugeChartInstance, rhythmByProductChartInstance, 
+                performanceScatterChartInstance, siloComparisonRadarChartInstance, volumeByProductChartInstance
+            ].forEach(chart => {
+                if (chart) chart.destroy();
+            });
+            dailyVolumeChartInstance = efficiencyGaugeChartInstance = rhythmByProductChartInstance = null;
+            performanceScatterChartInstance = siloComparisonRadarChartInstance = volumeByProductChartInstance = null;
+
+            if (state.view !== 'managementDashboard' || state.managementTab !== 'comparison') return;
+
+            // Volume by Product Chart (Doughnut)
+            const volumeByProductCtx = document.getElementById('volume-by-product-chart')?.getContext('2d');
+            if (volumeByProductCtx) {
+                const labels = metrics.volumeByCultivar.map(c => c[0]);
+                const data = metrics.volumeByCultivar.map(c => c[1]);
+                const backgroundColors = labels.map((_, i) => `hsl(${i * 60}, 70%, 50%)`); // Generate distinct colors
+
+                volumeByProductChartInstance = new Chart(volumeByProductCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: data,
+                            backgroundColor: backgroundColors,
+                            borderColor: '#ffffff',
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                labels: { color: '#475569' }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Silo Comparison Radar Chart
+            const siloComparisonRadarCtx = document.getElementById('silo-comparison-radar-chart')?.getContext('2d');
+            if (siloComparisonRadarCtx) {
+                const siloNames = Object.keys(metrics.siloPerformanceSummary);
+                const radarLabels = ['Ritmo Médio (Ton/h)', 'Volume Total (Ton)', 'Paradas (Horas)']; // Metrics to compare
+
+                const datasets = siloNames.map((siloName, index) => {
+                    const siloData = metrics.siloPerformanceSummary[siloName];
+                    const color = `hsl(${index * 60 + 120}, 70%, 60%)`; // Different color for each silo
+                    return {
+                        label: siloName,
+                        data: [
+                            siloData.averageRhythm,
+                            siloData.totalVolume,
+                            siloData.totalStoppageHours
+                        ],
+                        backgroundColor: `${color.replace(')', ', 0.2)')}`, // Semi-transparent fill
+                        borderColor: color,
+                        pointBackgroundColor: color,
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: color
+                    };
+                });
+
+                siloComparisonRadarChartInstance = new Chart(siloComparisonRadarCtx, {
+                    type: 'radar',
+                    data: {
+                        labels: radarLabels,
+                        datasets: datasets
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: '#475569' } } },
+                        elements: {
+                            line: {
+                                borderWidth: 3
+                            }
+                        },
+                        scales: {
+                            r: {
+                                angleLines: { color: '#e2e8f0' },
+                                grid: { color: '#e2e8f0' },
+                                pointLabels: { color: '#334155', font: { size: 12 } },
+                                ticks: {
+                                    color: '#64748b',
+                                    backdropColor: 'rgba(255, 255, 255, 0.75)',
+                                    beginAtZero: true,
+                                    maxTicksLimit: 5
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        function renderManagementDashboard() {
+            const tabs = [
+                { id: 'global', icon: 'globe', label: 'Performance Global' },
+                { id: 'comparison', icon: 'git-compare-arrows', label: 'Análise Comparativa' },
+                { id: 'stoppages', icon: 'siren', label: 'Gestão de Paradas' },
+                { id: 'siloDetail', icon: 'warehouse', label: 'Detalhe por Silo' },
+                { id: 'shift', icon: 'sunrise', label: 'Produção por Turno' },
+                { id: 'settings', icon: 'settings', label: 'Configurações' }
+            ];
+
+            return `
+                <div class="min-h-screen bg-slate-100 font-sans text-slate-800 p-4 md:p-8 flex flex-col">
+                    <header class="max-w-7xl mx-auto w-full mb-6 flex items-center justify-between border-b border-slate-200 pb-6">
+                        <button onclick="state.view='dashboard'; render();" class="flex items-center gap-2 bg-white hover:bg-slate-50 px-4 py-2 rounded-lg font-bold text-sm border border-slate-300 text-slate-700" title="Voltar ao Painel Operacional">
+                            <i data-lucide="arrow-left" class="w-4 h-4"></i> Painel Operacional
+                        </button>
+                        <h1 class="text-2xl font-bold text-slate-900">Dashboard Gerencial</h1>
+                        <div class="w-56"></div>
+                    </header>
+
+                    <main class="max-w-7xl mx-auto w-full flex-1 flex flex-col">
+                        <!-- Abas de Navegação -->
+                        <div class="flex items-center border-b border-slate-200 mb-8">
+                            ${tabs.map(tab => `
+                                <button 
+                                    onclick="state.managementTab='${tab.id}'; render();"
+                                    class="flex items-center gap-2 px-6 py-3 text-sm font-semibold transition-all ${state.managementTab === tab.id ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-500 hover:text-slate-800'}">
+                                    <i data-lucide="${tab.icon}" class="w-4 h-4"></i>
+                                    <span class="hidden md:inline">${tab.label}</span>
+                                </button>
+                            `).join('')}
+                        </div>
+
+                        <!-- Conteúdo da Aba Ativa -->
+                        <div class="flex-1">
+                            ${(() => {
+                                // Aqui podemos adicionar o conteúdo de cada aba no futuro
+                                switch (state.managementTab) {
+                                    case 'global': return renderGlobalPerformanceTab();
+                                    case 'comparison': return renderComparativeAnalysisTab();
+                                    case 'stoppages': return `<div class="text-center p-10"><h2 class="text-2xl font-bold text-slate-500">Conteúdo de Gestão de Paradas</h2></div>`;
+                                    // Adicione os outros casos aqui
+                                    case 'stoppages': return renderStoppagesTab();
+                                    case 'siloDetail': return renderSiloDetailTab();
+                                    case 'shift': return renderShiftProductionTab();
+                                    case 'settings': return renderSettingsTab();
+                                    default: return `<div class="text-center p-10"><h2 class="text-2xl font-bold">Aba em construção...</h2></div>`;
+                                }
+                            })()}
+                        </div>
+                    </main>
+                </div>
+            `;
+        }
+        // --- FIREBASE LISTENERS E CARREGAMENTO INICIAL ---
+        let isLoadingSilos = true;
+        let isLoadingRecords = true;
+
+        function setupFirebaseListeners() {
+            // Listener para a fila de silos
+            db.collection('silosQueue').onSnapshot(snapshot => {
+                const newSiloMap = {};
+                snapshot.forEach(doc => {
+                    newSiloMap[doc.id] = doc.data();
+                });
+                state.siloMap = newSiloMap;
+                isLoadingSilos = false;
+                render(); // Re-renderiza quando os dados dos silos chegam/atualizam
+            }, error => {
+                console.error("Erro ao buscar silosQueue:", error);
+                state.errorMessage = { title: "Erro de Conexão", message: "Não foi possível carregar a fila de silos do Firebase." };
+                isLoadingSilos = false;
+                render();
+            });
+
+            // Listener para os registros de beneficiamento
+            db.collection('beneficiamentoRecords').orderBy('timestamp', 'desc').onSnapshot(snapshot => {
+                const newCompletedHistory = [];
+                snapshot.forEach(doc => {
+                    newCompletedHistory.push(doc.data());
+                });
+                state.completedHistory = newCompletedHistory;
+                isLoadingRecords = false;
+                render(); // Re-renderiza quando os dados dos registros chegam/atualizam
+            }, error => {
+                console.error("Erro ao buscar beneficiamentoRecords:", error);
+                state.errorMessage = { title: "Erro de Conexão", message: "Não foi possível carregar o histórico de beneficiamento do Firebase." };
+                isLoadingRecords = false;
+                render();
+            });
+        }
+
+        // --- RENDERIZADOR PRINCIPAL ---
+        function render() { // Definição única da função render()
+            const app = document.getElementById('app');
+
+            if (isLoadingSilos || isLoadingRecords) {
+                app.innerHTML = `
+                    <div class="min-h-screen flex items-center justify-center bg-slate-100">
+                        <div class="text-center text-slate-500">
+                            <div class="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                            <p class="text-lg font-bold">Carregando dados do Firebase...</p>
+                        </div>
+                    </div>
+                `;
+            } else {
+                if (state.view === 'dashboard') {
+                    app.innerHTML = renderHeader() + renderDashboard();
+                } else if (state.view === 'beneficiamento') {
+                    app.innerHTML = renderBeneficiamento();
+                } else if (state.view === 'managementDashboard') {
+                    app.innerHTML = renderManagementDashboard();
+                }
+            }
+
+            // Atraso para garantir que o DOM foi atualizado antes de renderizar os gráficos
+            setTimeout(() => {
+                if (state.view === 'managementDashboard') {
+                    if (state.managementTab === 'global') renderGlobalCharts();
+                    if (state.managementTab === 'comparison') renderComparativeCharts();
+                    if (state.managementTab === 'stoppages') renderStoppagesCharts();
+                    if (state.managementTab === 'siloDetail') renderSiloDetailCharts();
+                    if (state.managementTab === 'shift') renderShiftProductionCharts();
+                }
+                lucide.createIcons();
+            }, 0);
+
+            // Gerenciamento do Modal de Erro
+            if (state.errorMessage) {
+                document.getElementById('error-title').innerText = state.errorMessage.title;
+                document.getElementById('error-message').innerText = state.errorMessage.message;
+                document.getElementById('error-silo').innerText = state.errorMessage.silo || '';
+                document.getElementById('error-modal').classList.remove('hidden');
+            } else {
+                document.getElementById('error-modal').classList.add('hidden');
+            }
+            
+            // Gerenciamento do Modal de Confirmação
+            const confirmModal = document.getElementById('confirm-modal');
+            if (state.confirmation.show) {
+                document.getElementById('confirm-modal-title').innerText = state.confirmation.title;
+                document.getElementById('confirm-modal-message').innerHTML = state.confirmation.message;
+                document.getElementById('confirm-modal-icon').setAttribute('data-lucide', state.confirmation.icon);
+                document.getElementById('confirm-modal-header').className = `p-6 text-white flex items-center gap-4 ${state.confirmation.color}`;
+                document.getElementById('confirm-ok-btn').className = `w-full text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs transition-all ${state.confirmation.color}`;
+                confirmModal.classList.remove('hidden');
+                lucide.createIcons(); // Re-renderiza o ícone do modal
+            } else {
+                confirmModal.classList.add('hidden');
+            }
+
+            // Sincroniza o valor do input de pesquisa se necessário (se houver um)
+            const searchInput = document.getElementById('search-input');
+            if (searchInput) searchInput.value = state.searchTerm;
+        }
+        function handleConfirmation(confirmed) {
+            if (confirmed && typeof state.confirmation.onConfirm === 'function') {
+                state.confirmation.onConfirm();
+            }
+            // Reset confirmation state and hide modal
+            state.confirmation = { show: false, onConfirm: () => {} };
+            // No need to call render() here, as the modal is hidden directly by classList.add
+            document.getElementById('confirm-modal').classList.add('hidden');
+        }
+
+        // Inicialização
+        window.onload = () => {            
+            auth.onAuthStateChanged(user => {
+                if (user) {
+                    // Usuário logado, pode carregar os dados
+                    setupFirebaseListeners(); // Inicia o carregamento de dados e configura os listeners
+                } else {
+                    // Usuário não logado, redireciona para a página de login
+                    window.location.href = 'login.html';
+                }
+            });
+        };
+
+    </script>
+
+    <!-- Modal de Erro (Movido para fora do #app para ser sempre acessível) -->
+    <div id="error-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div class="bg-white rounded-[2rem] shadow-2xl max-w-md w-full overflow-hidden">
+            <div class="bg-red-600 p-6 text-white flex items-center gap-4">
+                <i data-lucide="alert-circle" class="w-8 h-8"></i>
+                <div>
+                    <h3 id="error-title" class="text-xl font-black uppercase tracking-tight">Erro</h3>
+                    <p id="error-silo" class="text-[10px] font-bold opacity-80 uppercase tracking-widest"></p>
+                </div>
+            </div>
+            <div class="p-8 text-center">
+                <p id="error-message" class="text-slate-600 font-medium mb-8"></p>
+                <button onclick="document.getElementById('error-modal').classList.add('hidden'); state.errorMessage = null; render();" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs">Entendido</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Confirmação -->
+    <div id="confirm-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div class="bg-white rounded-[2rem] shadow-2xl max-w-md w-full overflow-hidden animate-fade-in-up">
+            <div id="confirm-modal-header" class="p-6 text-white flex items-center gap-4">
+                <i id="confirm-modal-icon" data-lucide="help-circle" class="w-8 h-8"></i>
+                <div>
+                    <h3 id="confirm-modal-title" class="text-xl font-black uppercase tracking-tight">Confirmar Ação</h3>
+                </div>
+            </div>
+            <div class="p-8 space-y-8">
+                <p id="confirm-modal-message" class="text-slate-600 font-medium text-center text-lg leading-relaxed"></p>
+                <div class="grid grid-cols-2 gap-4">
+                    <button onclick="handleConfirmation(false)" class="w-full bg-slate-200 text-slate-800 font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-300 transition-all">Cancelar</button>
+                    <button id="confirm-ok-btn" onclick="handleConfirmation(true)" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs transition-all">Confirmar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -317,10 +317,13 @@
     <!-- Novo Modal de Exclusão de Registro -->
     <div id="delete-modal" class="modal hidden"><div class="modal-content text-center border-t-4 border-red-500"><div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4"><svg class="h-6 w-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></div><h3 class="text-xl font-bold mb-2 text-slate-900">Excluir Registro?</h3><p class="mb-6 text-slate-600 text-sm">Esta ação removerá este lançamento do histórico permanentemente.</p><div class="flex justify-center gap-3"><button id="confirm-delete-btn" class="btn-primary bg-red-600 hover:bg-red-700">Confirmar Exclusão</button><button id="cancel-delete-btn" class="btn-primary bg-slate-200 text-slate-700 hover:bg-slate-300">Cancelar</button></div></div></div>
 
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, onAuthStateChanged, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, getDocs, doc, setDoc, onSnapshot, updateDoc, deleteDoc, writeBatch, deleteField } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <!-- Firebase SDKs (Compat version) -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+    <script>
+        // Removido "type=module" e importações. Usando a versão compatível do Firebase.
 
         const firebaseConfig = { apiKey: "AIzaSyB_ZscXHOoNP1Xkm-C6WLqhwEFcTsBk3GQ", authDomain: "integracaocoi.firebaseapp.com", projectId: "integracaocoi", storageBucket: "integracaocoi.firebasestorage.app", messagingSenderId: "177203745489", appId: "1:177203745489:web:4c7ebd68e7b03819032bf0" };
         const DEFAULT_CULTURES = { 'Braquiária': 30, 'Crotalária': 50, 'Milheto': 40, 'Soja': 80 };
@@ -362,21 +365,21 @@
 
         async function initApp() {
             try {
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                onAuthStateChanged(auth, (user) => {
+                app = firebase.initializeApp(firebaseConfig);
+                db = firebase.firestore();
+                auth = firebase.auth();
+                auth.onAuthStateChanged((user) => {
                     if (user) {
                         currentUser = user;
                         // 2. INICIA O LISTENER DE DADOS EM TEMPO REAL
                         fetchDashboardData(); 
                         
                         if (!configUnsubscribe) {
-                            onSnapshot(doc(db, 'silo_config', 'general'), (snap) => { if (snap.exists()) siloCultures = snap.data(); else setDoc(doc(db, 'silo_config', 'general'), DEFAULT_CULTURES); renderCulturesList(); });
-                            onSnapshot(doc(db, 'silo_config', 'shifts'), (snap) => { if (snap.exists()) { shiftConfig = snap.data(); updateShiftInputs(); } else { setDoc(doc(db, 'silo_config', 'shifts'), shiftConfig); } });
+                            db.collection('silo_config').doc('general').onSnapshot((snap) => { if (snap.exists) siloCultures = snap.data(); else db.collection('silo_config').doc('general').set(DEFAULT_CULTURES); renderCulturesList(); });
+                            db.collection('silo_config').doc('shifts').onSnapshot((snap) => { if (snap.exists) { shiftConfig = snap.data(); updateShiftInputs(); } else { db.collection('silo_config').doc('shifts').set(shiftConfig); } });
                             
                             // 3. LISTENER PARA O RESET GLOBAL (FILTRO)
-                            onSnapshot(doc(db, 'silo_config', 'silo_dashboard_visual_reset'), (snap) => {
+                            db.collection('silo_config').doc('silo_dashboard_visual_reset').onSnapshot((snap) => {
                                 if(snap.exists() && snap.data().lastResetTime) {
                                     globalResetTimestamp = new Date(snap.data().lastResetTime);
                                     // Re-aplica filtros assim que o reset é detectado
@@ -387,7 +390,7 @@
                     } else {
                         currentUser = null;
                         showNotification('info', 'Acesso Restrito: Faça login.');
-                        signInWithEmailAndPassword(auth, prompt("Email"), prompt("Senha")).catch(()=>{});
+                        auth.signInWithEmailAndPassword(prompt("Email"), prompt("Senha")).catch(()=>{});
                     }
                 });
             } catch (e) { console.error(e); showNotification('error', 'Erro de conexão'); }
@@ -415,7 +418,7 @@
             if(isNaN(newRate) || newRate <= 0) return showNotification('error', 'Valor inválido');
 
             try {
-                await updateDoc(doc(db, 'silo_config', 'general'), {
+                await db.collection('silo_config').doc('general').update({
                     [cultureName]: newRate
                 });
                 showNotification('success', `${cultureName}: Meta atualizada para ${newRate} T/h`);
@@ -454,7 +457,11 @@
             });
         }
 
-        window.deleteCulture = async (cultureName) => { if(confirm(`Excluir ${cultureName}?`)) try { await updateDoc(doc(db, 'silo_config', 'general'), { [cultureName]: deleteField() }); } catch(e) { console.error(e); } }
+        window.deleteCulture = async (cultureName) => { 
+            if(confirm(`Excluir ${cultureName}?`)) try { 
+                await db.collection('silo_config').doc('general').update({ [cultureName]: firebase.firestore.FieldValue.delete() }); 
+            } catch(e) { console.error(e); } 
+        }
         
         window.switchDashboardTab = (tabId) => {
             currentDashboardTab = tabId;
@@ -480,9 +487,9 @@
             if(!db || !auth.currentUser) return;
             try {
                 // Listener Real-Time para a coleção de registros de beneficiamento
-                const q = query(collection(db, `beneficiamentoRecords`));
+                const q = db.collection(`beneficiamentoRecords`);
                 
-                onSnapshot(q, (snap) => {
+                q.onSnapshot((snap) => {
                     // Mapeamos os dados, incluindo o ID do documento para permitir exclusão
                     cachedData = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
                     currentGlobalFilteredData = cachedData;
@@ -510,7 +517,7 @@
 
             if(start) { const dt=parseLocalStart(start); d=d.filter(r=>new Date(r.timestamp)>=dt); }
             if(end) { const dt=parseLocalEnd(end); d=d.filter(r=>new Date(r.timestamp)<=dt); }
-            if (shift && shift !== 'all') d = d.filter(r => r.shift === shift);
+            if (shift && shift !== 'all') d = d.filter(r => r.performance?.responsavel === shift);
             if (currentDashboardTab === 'individual' && silo && silo !== 'all') d = d.filter(r => r.siloName === silo);
             currentGlobalFilteredData = d;
             
@@ -524,34 +531,35 @@
         // Chart and Table Render functions
         
         function renderPerformanceTab(data) {
-            let tot=0, hrs=0, targetSum=0; 
+            let totalVolume = 0, totalEffectiveHours = 0, totalRhythmSum = 0, goalAdherenceSum = 0;
             const days={}, prods={};
             const sortedByDate = [...data].sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp));
             let accumulatedVol = 0;
             const accumulatedData = [];
 
             data.forEach(r=>{ 
-                tot+=r.toneladas||0; 
-                hrs+=(r.totalProcessingSeconds||0)/3600; 
-
-                // Get current target for calculation
-                const t = (siloCultures && siloCultures[r.cultivar]) ? siloCultures[r.cultivar] : (r.performance?.targetRate || 75);
-                targetSum += t;
-
-                const d=new Date(r.timestamp).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}); days[d]=(days[d]||0)+r.toneladas;
-                const p=r.cultivar||'Outros'; if(!prods[p]) prods[p]={s:0,c:0}; prods[p].s+=parseFloat(r.performance.rhythm); prods[p].c++;
+                const perf = r.performance;
+                if (!perf) return; // Pula registros sem dados de performance
+        
+                const volume = parseFloat(r.tonelagem) || 0; // CORREÇÃO FINAL: O campo correto é 'tonelagem'
+                const rhythm = parseFloat(perf.rhythm) || 0;
+                const effectiveHours = parseFloat(perf.effectiveHours) || 0;
+        
+                totalVolume += volume;
+                totalRhythmSum += rhythm;
+                totalEffectiveHours += effectiveHours;
+        
+                const target = siloCultures[r.cultivar] || 75;
+                if (target > 0) goalAdherenceSum += (rhythm / target);
+        
+                const d=new Date(r.timestamp).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}); days[d]=(days[d]||0)+volume;
+                const p=r.cultivar||'Outros'; if(!prods[p]) prods[p]={s:0,c:0}; prods[p].s+=rhythm; prods[p].c++;
             });
 
-            // Calculate Accumulated for Curve
-            sortedByDate.forEach(r => {
-                accumulatedVol += r.toneladas;
-                accumulatedData.push(accumulatedVol);
-            });
+            const avgRate = data.length > 0 ? (totalRhythmSum / data.length) : 0;
+            const adherence = data.length > 0 ? (goalAdherenceSum / data.length) * 100 : 0;
 
-            const avgRate = hrs > 0 ? tot/hrs : 0;
-            const adherence = targetSum > 0 ? (data.reduce((acc, r) => acc + parseFloat(r.performance.rhythm), 0) / targetSum) * 100 : 0; // Simplified adherence
-
-            document.getElementById('kpi-toneladas').textContent = tot.toFixed(2);
+            document.getElementById('kpi-toneladas').textContent = totalVolume.toFixed(2);
             document.getElementById('kpi-performance').textContent = avgRate.toFixed(2);
             document.getElementById('kpi-count').textContent = data.length;
             document.getElementById('kpi-adherence').textContent = (adherence > 100 ? 100 : adherence).toFixed(1) + '%';
@@ -691,7 +699,7 @@
             const siloStats = {};
             data.forEach(r => { // name, toneladas, performance.rhythm
                 if(!siloStats[r.name]) siloStats[r.name] = { vol:0, rates:[], count:0 };
-                siloStats[r.name].vol += r.toneladas;
+                siloStats[r.name].vol += parseFloat(r.tonelagem) || 0;
                 siloStats[r.name].rates.push(parseFloat(r.performance.rhythm));
                 siloStats[r.name].count++;
             });
@@ -701,7 +709,7 @@
                 .sort((a,b) => b[1].vol - a[1].vol)
                 .slice(0, 5);
 
-            const radarLabels = topSilos.map(s => s[0].replace('PULMÃO ', 'P'));
+            const radarLabels = topSilos.map(s => s[0].replace('PULMÃO ', 'SP '));
             const dataVol = topSilos.map(s => s[1].vol);
             const dataAvgRate = topSilos.map(s => s[1].rates.reduce((a,b)=>a+b,0)/s[1].count);
             // Consistency (inverse variance - simplified for visuals)
@@ -729,7 +737,7 @@
 
             // Product Pie
             const prodStats = {};
-            data.forEach(r => { prodStats[r.cultivar] = (prodStats[r.cultivar]||0) + r.toneladas; });
+            data.forEach(r => { prodStats[r.cultivar] = (prodStats[r.cultivar]||0) + (parseFloat(r.tonelagem) || 0); });
             
             const ctxPie = document.getElementById('product-pie-chart');
             if(ctxPie) {
@@ -811,7 +819,7 @@
                     <td>${r.cultivar}</td>
                     <td>${r.performance.responsavel}</td>
                     <td class="font-mono text-xs">${dur}</td>
-                    <td>${r.toneladas.toFixed(2)}</td>
+                    <td>${(parseFloat(r.tonelagem) || 0).toFixed(2)}</td>
                     <td class="font-bold ${parseFloat(r.performance.rhythm) >= (siloCultures[r.cultivar] || 75) ?'text-green-600':'text-red-600'}">${parseFloat(r.performance.rhythm).toFixed(2)}</td>
                     <td class="text-center"><button onclick="initDelete('${r.id}')" class="text-slate-400 hover:text-red-600 transition p-1" title="Excluir Registro"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button></td>
                 </tr>`;
@@ -867,10 +875,10 @@
         function renderIndividualTab(data) {
             const name = document.getElementById('filter-silo').value;
             document.getElementById('ind-silo-name').textContent = name==='all'?'Selecione um Silo':name;
-            let tot=0, hrs=0; data.forEach(r=>{ tot+=r.toneladas; hrs+=r.totalProcessingSeconds/3600; });
+            let tot=0, rhythmSum=0; data.forEach(r=>{ tot+=parseFloat(r.tonelagem)||0; rhythmSum+=parseFloat(r.performance?.rhythm)||0; });
             document.getElementById('ind-count').textContent=data.length;
             document.getElementById('ind-vol').textContent=tot.toFixed(2)+' T';
-            document.getElementById('ind-rate').textContent=(hrs>0?tot/hrs:0).toFixed(2)+' T/h';
+            document.getElementById('ind-rate').textContent=(data.length > 0 ? rhythmSum/data.length : 0).toFixed(2)+' T/h';
             const sorted = [...data].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
             
             const ctxComp = document.getElementById('performance-comparison-chart');
@@ -879,20 +887,20 @@
                 
                 // --- LÓGICA DE META ATUALIZADA ---
                 // Para exibir o gráfico com a meta ATUAL (editada), e não a histórica
-                // Usamos siloCultures[r.culture] se disponível, senão fallback para r.targetRate
-                const getTarget = (r) => (siloCultures && siloCultures[r.culture]) ? siloCultures[r.culture] : r.targetRate;
+                // Usamos siloCultures[r.cultivar] se disponível, senão fallback para 75
+                const getTarget = (r) => (siloCultures && siloCultures[r.cultivar]) ? siloCultures[r.cultivar] : 75;
 
                 chartComparison = new Chart(ctxComp, { 
                     type:'bar', 
                     data: { 
-                        labels: sorted.map(r => { const d = new Date(r.timestamp); return [d.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'}), r.siloName, r.culture]; }), 
+                        labels: sorted.map(r => { const d = new Date(r.timestamp); return [d.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'}), r.name, r.cultivar]; }), 
                         datasets: [ 
                             { 
                                 label:'Real', 
-                                data:sorted.map(r=>r.finalRate), 
+                                data:sorted.map(r=>parseFloat(r.performance.rhythm)), 
                                 // Cor dinâmica baseada na meta ATUAL
-                                backgroundColor: sorted.map(r => r.finalRate >= getTarget(r) ? 'rgba(22, 163, 74, 0.7)' : 'rgba(220, 38, 38, 0.7)'), 
-                                borderColor: sorted.map(r => r.finalRate >= getTarget(r) ? '#15803d' : '#b91c1c'), 
+                                backgroundColor: sorted.map(r => parseFloat(r.performance.rhythm) >= getTarget(r) ? 'rgba(22, 163, 74, 0.7)' : 'rgba(220, 38, 38, 0.7)'), 
+                                borderColor: sorted.map(r => parseFloat(r.performance.rhythm) >= getTarget(r) ? '#15803d' : '#b91c1c'), 
                                 borderWidth: 1, 
                                 order: 2 
                             }, 
@@ -918,7 +926,7 @@
                 });
             }
             const tb = document.querySelector('#individual-table tbody');
-            tb.innerHTML = sorted.map(r => { const s=r.totalProcessingSeconds; return `<tr class="border-b hover:bg-slate-50"><td class="text-xs">${new Date(r.timestamp).toLocaleDateString('pt-BR')}</td><td>${r.culture}</td><td>${r.shift}</td><td class="font-mono">${Math.floor(s/3600)}:${Math.floor((s%3600)/60)}:${Math.floor(s%60)}</td><td>${r.toneladas.toFixed(2)}</td><td class="font-bold">${r.finalRate.toFixed(2)}</td></tr>`; }).join('') || '<tr><td colspan="6" class="text-center py-4">Sem dados</td></tr>';
+            tb.innerHTML = sorted.map(r => { const dur = r.performance.totalHours + 'h'; return `<tr class="border-b hover:bg-slate-50"><td class="text-xs">${new Date(r.timestamp).toLocaleDateString('pt-BR')}</td><td>${r.cultivar}</td><td>${r.performance.responsavel}</td><td class="font-mono">${dur}</td><td>${(parseFloat(r.tonelagem)||0).toFixed(2)}</td><td class="font-bold">${(parseFloat(r.performance.rhythm)||0).toFixed(2)}</td></tr>`; }).join('') || '<tr><td colspan="6" class="text-center py-4">Sem dados</td></tr>';
             const tbP = document.querySelector('#individual-pauses-table tbody');
             let pList=[];
             sorted.forEach(r=>{ if(parseFloat(r.performance.stoppageHours) > 0) pList.push({ d:new Date(r.timestamp), r:r.performance.parada, dur:parseFloat(r.performance.stoppageHours)*3600, l:(parseFloat(r.performance.stoppageHours) * (siloCultures[r.cultivar]||75)) }); });
@@ -927,7 +935,7 @@
 
         function renderShiftProductionTab(data) {
             let shiftStats = { 'Turno A': 0, 'Turno B': 0, 'Turno C': 0 }, hourlyRate = {}, userStats = {};
-            data.forEach(r => { if (shiftStats[r.shift] !== undefined) shiftStats[r.shift] += r.toneladas; const hour = new Date(r.timestamp).getHours(); if (!hourlyRate[hour]) hourlyRate[hour] = { sum:0, cnt:0 }; hourlyRate[hour].sum += r.finalRate; hourlyRate[hour].cnt++; if (!userStats[r.userEmail]) userStats[r.userEmail] = 0; userStats[r.userEmail] += r.toneladas; });
+            data.forEach(r => { const shift = r.performance?.responsavel?.includes("Turno") ? r.performance.responsavel : "N/A"; if (shiftStats[shift] !== undefined) shiftStats[shift] += parseFloat(r.tonelagem)||0; const hour = new Date(r.timestamp).getHours(); if (!hourlyRate[hour]) hourlyRate[hour] = { sum:0, cnt:0 }; hourlyRate[hour].sum += parseFloat(r.performance.rhythm)||0; hourlyRate[hour].cnt++; const user = r.performance.responsavel || "Desconhecido"; if (!userStats[user]) userStats[user] = 0; userStats[user] += parseFloat(r.tonelagem)||0; });
             if (window.ChartDataLabels) {
                 const ctxShift = document.getElementById('shift-comparison-chart');
                 if (ctxShift) {
@@ -945,7 +953,7 @@
                 
                 const ctxRank = document.getElementById('user-ranking-chart');
                 if (ctxRank) {
-                    if (chartUserRank) chartUserRank.destroy();
+                    if (chartUserRank) chartUserRank.destroy(); // O nome do usuário agora é pego do campo 'responsavel'
                     chartUserRank = new Chart(ctxRank, { type: 'bar', indexAxis: 'y', data: { labels: sortedUsers.map(u => u[0].split('@')[0]), datasets: [{ label: 'Total (T)', data: sortedUsers.map(u => u[1]), backgroundColor: '#6366f1', borderRadius: 4 }] }, plugins: [window.ChartDataLabels], options: { responsive: true, maintainAspectRatio: false, plugins: { datalabels: { anchor: 'end', align: 'end', color: '#6366f1', font: { weight: 'bold', size: 10 }, formatter: (v)=>v.toFixed(1) } }, scales: { x: { beginAtZero: true } } } });
                 }
                 const userTable = document.getElementById('user-ranking-table').querySelector('tbody');
@@ -974,9 +982,9 @@
 
             safeAddClick('btn-save-shifts', async () => {
                 const shifts = { A: { start: document.getElementById('shift-a-start').value, end: document.getElementById('shift-a-end').value }, B: { start: document.getElementById('shift-b-start').value, end: document.getElementById('shift-b-end').value }, C: { start: document.getElementById('shift-c-start').value, end: document.getElementById('shift-c-end').value } };
-                try { await setDoc(doc(db, 'silo_config', 'shifts'), shifts); showNotification('success', 'Turnos salvos'); } catch { showNotification('error', 'Erro ao salvar turnos'); }
+                try { await db.collection('silo_config').doc('shifts').set(shifts); showNotification('success', 'Turnos salvos'); } catch { showNotification('error', 'Erro ao salvar turnos'); }
             });
-            safeAddClick('btn-add-culture', async()=>{const n=document.getElementById('new-culture-name').value.trim();const t=parseFloat(document.getElementById('new-culture-target').value);if(n&&t>0)try{await updateDoc(doc(db,'silo_config','general'),{[n]:t});document.getElementById('new-culture-name').value='';document.getElementById('new-culture-target').value='';showNotification('success','Salvo');}catch{showNotification('error','Erro');}});
+            safeAddClick('btn-add-culture', async()=>{const n=document.getElementById('new-culture-name').value.trim();const t=parseFloat(document.getElementById('new-culture-target').value);if(n&&t>0)try{await db.collection('silo_config').doc('general').update({[n]:t});document.getElementById('new-culture-name').value='';document.getElementById('new-culture-target').value='';showNotification('success','Salvo');}catch{showNotification('error','Erro');}});
             
             safeAddClick('btn-clear-db', ()=>document.getElementById('clear-db-modal').classList.remove('hidden'));
             safeAddClick('cancel-clear-db', ()=>document.getElementById('clear-db-modal').classList.add('hidden'));
@@ -1000,7 +1008,7 @@
                 const newResetTime = new Date(maxTs).toISOString();
                 
                 try {
-                    await setDoc(doc(db, 'silo_config', 'silo_dashboard_visual_reset'), { 
+                    await db.collection('silo_config').doc('silo_dashboard_visual_reset').set({ 
                         lastResetTime: newResetTime 
                     });
                     showNotification('success', 'Comando de limpeza enviado para todos os terminais.');
@@ -1014,7 +1022,7 @@
             safeAddClick('confirm-delete-btn', async () => {
                 if(deleteTargetId) {
                     try {
-                        await deleteDoc(doc(db, "beneficiamentoRecords", deleteTargetId));
+                        await db.collection("beneficiamentoRecords").doc(deleteTargetId).delete();
                         showNotification('success', 'Registro excluído com sucesso.');
                         document.getElementById('delete-modal').classList.add('hidden');
                         // A atualização da tabela ocorrerá automaticamente via onSnapshot

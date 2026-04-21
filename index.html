@@ -96,6 +96,7 @@
             selectedSiloId: null,
             siloMap: {},
             completedHistory: [],
+            dashboardDateFilter: '', // NOVO: Estado para o filtro de data do dashboard
             searchTerm: '', // Usado para filtros futuros, se implementado
             errorMessage: null, // Para exibir erros ao usuário
             // Estados temporários para a aba de beneficiamento
@@ -109,6 +110,7 @@
                 stopStart: { date: '', hour: '' },
                 stopEnd: { date: '', hour: '' },
                 stopReason: ''
+                // tonelagem é preenchido dinamicamente
             },
             confirmation: {
                 show: false,
@@ -170,60 +172,53 @@
             if (!rawData.trim()) return;
 
             const rows = rawData.split('\n');
-            const newSilosFromPaste = {}; // <-- Variável que faltava
+            const batch = db.batch();
 
             rows.forEach(row => {
                 const col = row.split('\t');
                 if (col.length < 5 || !col[1] || row.toLowerCase().includes('tipo de amostra')) return;
-                
+
                 const normName = normalizeSiloName(col[1]);
-                if (normName && FIXED_SILOS.includes(normName)) {
-                    const existingSiloData = state.siloMap[normName];
-                    const newDataColeta = col[2] || '-';
-                    const newHoraInicio = col[5] || '-';
+                const dataColeta = col[2] || '';
+                const horaInicio = col[5] || '';
 
-                    // Lógica de "inteligência": Detecta se é uma carga nova ou a mesma.
-                    const isNewLoad = !existingSiloData || 
-                                      existingSiloData.dataColeta !== newDataColeta || 
-                                      existingSiloData.horaInicio !== newHoraInicio;
+                // Se não houver nome do silo, data ou hora, pula a linha.
+                if (!normName || !dataColeta || !horaInicio) return;
 
-                    const autoTons = calculateAutoTons(col[3], col[4]);
-                    const mixQty = parseInt(col[14]) || 0;
+                // Cria um ID único para cada carga, combinando nome, data e hora.
+                // Ex: PULMÃO-01_20260726_1030
+                const dateParts = dataColeta.split('/');
+                const dateFormatted = `${dateParts[2]}${dateParts[1]}${dateParts[0]}`; // YYYYMMDD
+                const timeFormatted = horaInicio.replace(':', ''); // HHMM
+                const uniqueLoadId = `${normName.replace(/ /g, '-')}_${dateFormatted}_${timeFormatted}`;
 
-                    const siloDataForUpdate = {
-                        ...existingSiloData, // Começa com os dados existentes para preservar status e performance
-                        tipoAmostra: col[0] || '-', // E atualiza com os dados da planilha
-                        dataColeta: newDataColeta,
-                        origem1: col[3] || '',
-                        origem2: col[4] || '',
-                        horaInicio: newHoraInicio,
-                        respColeta: col[6] || '-',
-                        cultivar: col[9] || '-',
-                        umidade: col[10] || '-',
-                        temp: col[11] || '-',
-                        misturaQtde: mixQty,
-                        misturaCultivar: col[15] || '',
-                        analista: col[17] || '-',
-                        statusLASA: col[18] || 'EM ANÁLISE',
-                        tonelagem: autoTons > 0 ? autoTons : (existingSiloData?.tonelagem || 0),
-                        lastUpdate: new Date().toISOString()
-                    };
+                const autoTons = calculateAutoTons(col[3], col[4]);
+                const mixQty = parseInt(col[14]) || 0;
 
-                    if (isNewLoad) {
-                        // Se for uma carga nova, reseta o status e a performance.
-                        siloDataForUpdate.statusBeneficiamento = 'Irá Beneficiar';
-                        siloDataForUpdate.performance = null;
-                    }
-                    newSilosFromPaste[normName] = siloDataForUpdate;
-                }
+                const newLoadData = {
+                    name: normName, // Adiciona o nome do silo para referência
+                    tipoAmostra: col[0] || '-',
+                    dataColeta: dataColeta,
+                    origem1: col[3] || '',
+                    origem2: col[4] || '',
+                    horaInicio: horaInicio,
+                    respColeta: col[6] || '-',
+                    cultivar: col[9] || '-',
+                    umidade: col[10] || '0',
+                    temp: col[11] || '0',
+                    misturaQtde: mixQty,
+                    misturaCultivar: col[15] || '',
+                    analista: col[17] || '-',
+                    statusLASA: col[18] || 'EM ANÁLISE',
+                    tonelagem: autoTons > 0 ? autoTons : 0,
+                    statusBeneficiamento: 'Irá Beneficiar',
+                    performance: null,
+                    lastUpdate: new Date().toISOString()
+                };
+
+                const docRef = db.collection('silosQueue').doc(uniqueLoadId);
+                batch.set(docRef, newLoadData, { merge: true });
             });
-
-            const batch = db.batch();
-            for (const name in newSilosFromPaste) {
-                const siloData = newSilosFromPaste[name];
-                const docRef = db.collection('silosQueue').doc(name); // Usar o nome do silo como ID do documento
-                batch.set(docRef, siloData, { merge: true }); // Usa SET com MERGE para garantir que não sobrescreva campos se a lógica falhar
-            }
 
             try {
                 await batch.commit();
@@ -236,14 +231,16 @@
         }
 
         function updateSiloTonnage(name, inputElement) {
-            const capacity = getSiloCapacity(name);
+            const data = state.siloMap[name]; // 'name' é agora o uniqueLoadId
+            const siloName = data?.name || name; // Extrai o nome real do silo
+            const capacity = getSiloCapacity(siloName);
             let value = parseFloat(inputElement.value) || 0;
 
             if (value > capacity) {
                 state.errorMessage = {
                     title: "Capacidade Excedida",
-                    message: `A capacidade máxima para o ${name} é de ${capacity} toneladas. O valor foi ajustado para o máximo permitido.`,
-                    silo: name
+                    message: `A capacidade máxima para o ${siloName} é de ${capacity} toneladas. O valor foi ajustado para o máximo permitido.`,
+                    silo: siloName
                 };
                 value = capacity; // Ajusta o valor para a capacidade máxima
                 inputElement.value = value; // Atualiza o campo de input visualmente
@@ -253,17 +250,18 @@
             db.collection('silosQueue').doc(name).update({ tonelagem: value });
         }
         async function updateSiloStatus(name, newStatus) {
-            const data = state.siloMap[name];
+            const data = state.siloMap[name]; // 'name' é o uniqueLoadId
+            const siloName = data?.name || name; // Extrai o nome real do silo
             if (newStatus === 'Em Beneficiamento' && (!data.tonelagem || data.tonelagem <= 0)) {
                 state.errorMessage = {
                     title: "Silo Vazio",
-                    message: `Informe a tonelagem do ${name} antes de iniciar o beneficiamento.`,
-                    silo: name
+                    message: `Informe a tonelagem do ${siloName} antes de iniciar o beneficiamento.`,
+                    silo: siloName
                 };
                 render();
                 return;
             }
-            
+
             try {
                 const siloRef = db.collection('silosQueue').doc(name);
                 await siloRef.update({
@@ -279,19 +277,21 @@
                 }
             } catch (error) {
                 console.error(`Erro ao atualizar status do silo ${name}:`, error);
-                state.errorMessage = { title: "Erro ao Atualizar Status", message: `Não foi possível atualizar o status do silo ${name} no Firebase.` };
+                state.errorMessage = { title: "Erro ao Atualizar Status", message: `Não foi possível atualizar o status da carga no Firebase.` };
                 render();
             }
         }
 
         // Function to handle confirmation before updating silo status
         function confirmStatusChange(name, newStatus) {
+            const siloData = state.siloMap[name];
+            const siloName = siloData?.name || name; // Extrai o nome real do silo
+
             let title = 'Confirmar Alteração';
-            let message = `Deseja realmente alterar o status do silo <strong>${name}</strong> para <strong>"${newStatus}"</strong>?`;
+            let message = `Deseja realmente alterar o status da carga do silo <strong>${siloName}</strong> (coleta de ${siloData?.dataColeta}) para <strong>"${newStatus}"</strong>?`;
             let icon = 'help-circle';
             let color = 'bg-slate-800';
 
-            const siloData = state.siloMap[name];
             // Lógica de "virada de chave": checa se o silo já foi beneficiado e tem dados de performance
             if (newStatus === 'Em Beneficiamento' && siloData?.statusBeneficiamento === 'Beneficiado' && siloData?.performance) {
                 state.confirmation = {
@@ -312,17 +312,17 @@
             }
             if (newStatus === 'Em Beneficiamento') {
                 title = 'Iniciar Beneficiamento?';
-                message = `Você será redirecionado para a tela de lançamento de performance do silo <strong>${name}</strong>. Confirma?`;
+                message = `Você será redirecionado para a tela de lançamento de performance da carga do silo <strong>${siloName}</strong>. Confirma?`;
                 icon = 'play-circle';
                 color = 'bg-blue-600';
             } else if (newStatus === 'Beneficiado') {
                 title = 'Marcar como Concluído?';
-                message = `O silo <strong>${name}</strong> será marcado como "Concluído". Esta ação não pode ser desfeita facilmente.`;
+                message = `A carga do silo <strong>${siloName}</strong> será marcada como "Concluída". Esta ação não pode ser desfeita facilmente.`;
                 icon = 'check-circle';
                 color = 'bg-slate-500';
             } else if (newStatus === 'Irá Beneficiar') {
                 title = 'Marcar como Aguardando?';
-                message = `O silo <strong>${name}</strong> voltará para o status "Aguardando".`;
+                message = `A carga do silo <strong>${siloName}</strong> voltará para o status "Aguardando".`;
                 icon = 'clock';
                 color = 'bg-amber-500';
             }
@@ -599,15 +599,36 @@
         }
 
         function renderDashboard() {
+            const filterDate = state.dashboardDateFilter;
+            let silosToRender = [...FIXED_SILOS];
+            let activeSilosInView = 0;
+
+            // 1. Ordenar os silos: com dados mais recentes primeiro, depois os vazios.
+            silosToRender.sort((a, b) => {
+                const siloA = state.siloMap[a];
+                const siloB = state.siloMap[b];
+
+                if (siloA && !siloB) return -1; // A com dados, B sem -> A primeiro
+                if (!siloA && siloB) return 1;  // A sem dados, B com -> B primeiro
+                if (!siloA && !siloB) return 0; // Ambos sem dados -> mantém ordem
+
+                // Ambos com dados, ordena pela data de coleta (mais recente primeiro)
+                const dateA = new Date(siloA.dataColeta.split('/').reverse().join('-'));
+                const dateB = new Date(siloB.dataColeta.split('/').reverse().join('-'));
+                return dateB - dateA;
+            });
+
+            // A contagem de silos ativos agora é sempre o total de silos com dados.
+            // O filtro de data é apenas visual.
+            activeSilosInView = Object.keys(state.siloMap).length;
+
             return `
                 <main class="max-w-7xl mx-auto p-4 md:p-8 space-y-8">
                     <!-- Import Section -->
                     <section class="bg-white rounded-[2.5rem] shadow-xl border border-slate-200 overflow-hidden">
                         <div class="bg-slate-900 p-5 flex items-center justify-between text-white">
                             <div class="flex items-center gap-3">
-                                <div class="bg-green-500/20 p-2 rounded-xl border border-green-500/30 text-green-400">
-                                    <i data-lucide="clipboard-paste"></i>
-                                </div>
+                                <div class="bg-green-500/20 p-2 rounded-xl border border-green-500/30 text-green-400"><i data-lucide="clipboard-paste"></i></div>
                                 <h2 class="text-sm font-black uppercase tracking-widest">Sincronizar Planilha VOC</h2>
                             </div>
                         </div>
@@ -618,16 +639,24 @@
                     </section>
 
                     <!-- Silos Grid -->
+                    <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pt-4 border-t border-slate-200">
+                        <h3 class="text-lg font-black text-slate-700">Monitoramento de Silos (${activeSilosInView})</h3>
+                        <div class="flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
+                            <label for="date-filter" class="text-xs font-bold text-slate-500 pl-2">Filtrar por Data:</label>
+                            <input type="date" id="date-filter" value="${state.dashboardDateFilter}" onchange="state.dashboardDateFilter = this.value; render();" class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-blue-400">
+                            ${filterDate ? `<button onclick="state.dashboardDateFilter = ''; render();" class="p-2 text-red-500 hover:bg-red-100 rounded-lg" title="Limpar filtro"><i data-lucide="x" class="w-4 h-4"></i></button>` : ''}
+                        </div>
+                    </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
-                        ${FIXED_SILOS.map(name => renderSiloCard(name)).join('')}
+                        ${silosToRender.map(name => renderSiloCard(name, filterDate)).join('')}
                     </div>
                 </main>
             `;
         }
 
-        function renderSiloCard(name) {
+        function renderSiloCard(name, filterDate) {
             const data = state.siloMap[name];
-            if (!data) {
+            if (!data) { // Silo sem dados
                 return `
                     <div class="rounded-[2.5rem] border-2 border-dashed border-slate-200 opacity-40 flex flex-col items-center justify-center py-12 space-y-4">
                         <div class="p-4 bg-slate-200 rounded-full text-slate-500"><i data-lucide="warehouse"></i></div>
@@ -636,39 +665,53 @@
                 `;
             }
 
+            // Lógica de filtro visual
+            let filterClasses = '';
+            if (filterDate) {
+                const [y, m, d] = filterDate.split('-');
+                const formattedFilterDate = `${d}/${m}/${y}`;
+                if (data.dataColeta !== formattedFilterDate) {
+                    filterClasses = 'opacity-30 hover:opacity-100 transition-opacity';
+                }
+            }
             const isDone = data.statusBeneficiamento === 'Beneficiado';
             const isActive = data.statusBeneficiamento === 'Em Beneficiamento';
-            const capacity = getSiloCapacity(name);
-            const occupancy = (data.tonelagem / capacity) * 100;
+            const capacity = getSiloCapacity(data.name); // Usa data.name para obter a capacidade
             const humVal = parseFloat(data.umidade.replace(',', '.'));
             const humClass = (!isNaN(humVal) && humVal >= 12 && humVal <= 13) ? "bg-green-100 border-green-300 text-green-700" : "bg-red-100 border-red-300 text-red-700";
             const isLasaAlert = data.statusLASA.toUpperCase().includes('LASA') || data.statusLASA.toUpperCase().includes('REPROVADO');
 
             return `
-                <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white border-slate-200 shadow-xl ${isDone ? 'opacity-60' : ''} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
+                <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white shadow-xl ${isDone ? 'opacity-60 border-slate-200' : 'border-slate-200'} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
                     <div class="px-6 py-4 flex justify-between items-center rounded-t-[2.3rem] ${isDone ? 'bg-slate-400' : (isActive ? 'bg-blue-600' : 'bg-slate-900')} text-white">
-                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${name}</span></div>
+                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${data.name}</span></div>
                         <span class="text-[10px] font-black">${capacity}T</span>
                     </div>
 
                     <div class="p-6 space-y-5 flex-1 flex flex-col">
                         <div class="space-y-1">
-                            <div class="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
-                                <button
-                                    onclick="confirmStatusChange('${name}', 'Irá Beneficiar')"
-                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Irá Beneficiar' ? 'bg-amber-400 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
-                                    Aguardando
-                                </button>
-                                <button
-                                    onclick="confirmStatusChange('${name}', 'Em Beneficiamento')"
-                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Em Beneficiamento' ? 'bg-blue-600 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
-                                    Beneficiar
-                                </button>
-                                <button
-                                    onclick="confirmStatusChange('${name}', 'Beneficiado')"
-                                    class="px-2 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${data.statusBeneficiamento === 'Beneficiado' ? 'bg-slate-400 text-white shadow' : 'hover:bg-slate-200 text-slate-500'}">
-                                    Concluído
-                                </button>
+                            <div class="bg-slate-100 p-2 rounded-xl border border-slate-200 relative text-center">
+                                ${(() => {
+                                    if (isDone) {
+                                        return `
+                                            <div class="absolute inset-0 bg-slate-100/80 backdrop-blur-[2px] rounded-xl flex items-center justify-center z-10">
+                                                <button onclick="confirmStatusChange('${name}', 'Em Beneficiamento')" class="flex items-center gap-2 text-sm font-black bg-white border-2 border-yellow-400 text-yellow-700 px-4 py-2 rounded-xl shadow-lg hover:bg-yellow-50 transition-all">
+                                                    <i data-lucide="edit" class="w-4 h-4"></i> Editar Lançamento
+                                                </button>
+                                            </div>
+                                            <div class="text-xs font-black text-slate-500 uppercase py-2">Concluído / Vazio</div>
+                                        `;
+                                    }
+                                    if (isActive) {
+                                        return `<div class="text-xs font-black text-blue-600 uppercase py-2 animate-pulse">Processando...</div>`;
+                                    }
+                                    // Default: "Aguardando"
+                                    return `
+                                        <button onclick="confirmStatusChange('${name}', 'Em Beneficiamento')" class="w-full py-3 text-sm font-black uppercase rounded-lg transition-all bg-blue-600 text-white shadow hover:bg-blue-500">
+                                            Beneficiar
+                                        </button>
+                                    `;
+                                })()}
                             </div>
                         </div>
 
@@ -966,11 +1009,18 @@
             // Gerenciamento do Modal de Confirmação
             const confirmModal = document.getElementById('confirm-modal');
             if (state.confirmation.show) {
+                const okBtn = document.getElementById('confirm-ok-btn');
+                const cancelBtn = document.getElementById('confirm-cancel-btn');
+
                 document.getElementById('confirm-modal-title').innerText = state.confirmation.title;
                 document.getElementById('confirm-modal-message').innerHTML = state.confirmation.message;
                 document.getElementById('confirm-modal-icon').setAttribute('data-lucide', state.confirmation.icon);
                 document.getElementById('confirm-modal-header').className = `p-6 text-white flex items-center gap-4 ${state.confirmation.color}`;
-                document.getElementById('confirm-ok-btn').className = `w-full text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs transition-all ${state.confirmation.color}`;
+                
+                okBtn.className = `w-full text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs transition-all ${state.confirmation.color}`;
+                okBtn.innerText = state.confirmation.onConfirmText || 'Confirmar';
+                cancelBtn.innerText = state.confirmation.onCancelText || 'Cancelar';
+
                 confirmModal.classList.remove('hidden');
                 lucide.createIcons(); // Re-renderiza o ícone do modal
             } else {
@@ -984,19 +1034,22 @@
         function handleConfirmation(confirmed) {
             if (confirmed && typeof state.confirmation.onConfirm === 'function') {
                 state.confirmation.onConfirm();
+            } else if (!confirmed && typeof state.confirmation.onCancel === 'function') {
+                state.confirmation.onCancel();
             }
             // Reset confirmation state and hide modal
-            state.confirmation = { show: false, onConfirm: () => {} };
+            state.confirmation = { show: false, onConfirm: () => {}, onCancel: null };
             // No need to call render() here, as the modal is hidden directly by classList.add
             document.getElementById('confirm-modal').classList.add('hidden');
         }
 
         // Inicialização
         window.onload = () => {            
+            render(); // Renderiza a tela de loading inicial
             auth.onAuthStateChanged(user => {
                 if (user) {
                     // Usuário logado, pode carregar os dados
-                    setupFirebaseListeners(); // Inicia o carregamento de dados e configura os listeners
+                    setupFirebaseListeners();
                 } else {
                     // Usuário não logado, redireciona para a página de login
                     window.location.href = 'login.html';
@@ -1035,7 +1088,7 @@
             <div class="p-8 space-y-8">
                 <p id="confirm-modal-message" class="text-slate-600 font-medium text-center text-lg leading-relaxed"></p>
                 <div class="grid grid-cols-2 gap-4">
-                    <button onclick="handleConfirmation(false)" class="w-full bg-slate-200 text-slate-800 font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-300 transition-all">Cancelar</button>
+                    <button id="confirm-cancel-btn" onclick="handleConfirmation(false)" class="w-full bg-slate-200 text-slate-800 font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-300 transition-all">Cancelar</button>
                     <button id="confirm-ok-btn" onclick="handleConfirmation(true)" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl uppercase tracking-widest text-xs transition-all">Confirmar</button>
                 </div>
             </div>

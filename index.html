@@ -125,18 +125,23 @@
         // --- FUNÇÕES DE UTILIDADE ---
 
         function getSiloCapacity(name) {
-            const num = parseInt(name.match(/\d+/)?.[0]);
+            // Ensure 'name' is a non-empty string before proceeding
+            if (typeof name !== 'string' || name.trim() === '') {
+                return 0;
+            }
+            const numMatch = name.match(/\d+/);
+            const num = numMatch ? parseInt(numMatch[0]) : 0; // Ensure num is a number, default to 0
             if (name.includes('REPASSE')) return 72;
             const silos72 = [1, 8, 9, 16];
             return silos72.includes(num) ? 72 : 84;
         }
 
         function highlightNumbers(text) {
-            if (!text) return '';
+            if (!text) return ''; // Adicionado para garantir que text seja válido
             return text.toString().replace(/(\d+)/g, '<span class="bg-yellow-300 text-slate-900 px-1 rounded font-black shadow-sm mx-0.5 border border-yellow-400">$1</span>');
         }
 
-        function calculateAutoTons(o1, o2) {
+        function calculateAutoTons(o1, o2) { // Adicionado para garantir que o1 e o2 sejam válidos
             const text = `${o1} ${o2}`.toLowerCase();
             const matches = text.match(/\d+/g);
             if (matches && (text.includes('secador') || text.includes('sec'))) {
@@ -149,12 +154,21 @@
         function normalizeSiloName(name) {
             if (!name) return null;
             const clean = name.toString().toUpperCase().trim();
-            const numMatch = clean.match(/\d+/);
-            const num = numMatch ? String(numMatch[0]).padStart(2, '0') : null;
-            if (!num) return null;
+            const numMatch = clean.match(/\d+/g); // Use 'g' to get all numbers
+            if (!numMatch || numMatch.length === 0) return null; // Ensure at least one number is found
             
-            if (clean.includes('R')) return `REPASSE ${num}`;
-            return `PULMÃO ${num}`;
+            // Get the last number found, as it's usually the silo number
+            // CORREÇÃO: Se o nome for um ID de carga (ex: PULMAO-01_...), extrai o nome antes do _
+            if (clean.includes('_') && (clean.includes('PULMAO-') || clean.includes('REPASSE-') || clean.includes('ENSAQUE-'))) {
+                const siloPart = clean.split('_')[0];
+                return siloPart.replace(/-/g, ' '); // Retorna "PULMAO 01"
+            }
+
+            const num = String(numMatch[numMatch.length - 1]).padStart(2, '0');
+            
+            if (clean.includes('REPASSE') || clean.startsWith('R')) return `REPASSE ${num}`;
+            if (clean.includes('ENSAQUE')) return `ENSAQUE ${num}`;
+            return `PULMÃO ${num}`; // Default for PULMÃO or other types
         }
 
         function getRhythmColor(rhythm) {
@@ -491,20 +505,16 @@
 
             const batch = db.batch();
 
-            // 1. Atualizar o silo na coleção silosQueue
+            // 1. Deletar a carga da fila de trabalho (silosQueue)
             const siloRef = db.collection('silosQueue').doc(silo);
-            batch.update(siloRef, {
-                statusBeneficiamento: 'Beneficiado',
-                // Adiciona a tonelagem ao objeto de performance para consistência na edição
-                performance: { ...perfData, tonelagem: state.form.tonelagem },
-                lastUpdate: new Date().toISOString()
-            });
+            batch.delete(siloRef);
 
             // 2. Adicionar o registro à coleção beneficiamentoRecords
             const recordRef = db.collection('beneficiamentoRecords').doc(); // ID auto-gerado pelo Firestore
             batch.set(recordRef, {
                 id: recordRef.id, // Armazenar o ID do Firestore dentro do documento
                 name: silo,
+                dataColeta: state.siloMap[silo].dataColeta, // Adiciona a data de coleta ao registro histórico
                 cultivar: state.siloMap[silo].cultivar,
                 tonelagem: state.form.tonelagem, // Usa a tonelagem do formulário para o registro
                 umidade: state.siloMap[silo].umidade,
@@ -551,6 +561,35 @@
             };
             render();
         }
+
+        // NOVA FUNÇÃO: Limpeza de Cargas "Presas"
+        async function cleanupStuckSilos() {
+            const stuckSilos = Object.entries(state.siloMap).filter(([id, data]) => data.statusBeneficiamento === 'Beneficiado');
+
+            if (stuckSilos.length === 0) {
+                alert('Nenhuma carga concluída encontrada na fila para limpar.');
+                return;
+            }
+
+            if (!confirm(`Foram encontradas ${stuckSilos.length} cargas concluídas "presas" na fila de trabalho. Deseja movê-las para o histórico agora?`)) {
+                return;
+            }
+
+            const batch = db.batch();
+            stuckSilos.forEach(([id, data]) => {
+                // 1. Deleta da fila de trabalho
+                const siloRef = db.collection('silosQueue').doc(id);
+                batch.delete(siloRef);
+
+                // 2. Cria no histórico (se já não existir um com o mesmo nome/id)
+                const recordRef = db.collection('beneficiamentoRecords').doc(); // Novo ID para o registro
+                batch.set(recordRef, { ...data, id: recordRef.id, name: id }); // Usa o ID antigo como 'name' para referência
+            });
+
+            await batch.commit();
+            alert(`${stuckSilos.length} cargas foram limpas e movidas para o histórico com sucesso!`);
+        }
+
         // --- COMPONENTES DE INTERFACE ---
 
         function renderHeader() {
@@ -586,6 +625,9 @@
                             <a href="dashboard.html" class="p-3 text-slate-500 hover:bg-slate-50 rounded-2xl transition-all border border-transparent hover:border-slate-100" title="Dashboard de Gestão">
                                 <i data-lucide="layout-dashboard"></i>
                             </a>
+                            <button onclick="cleanupStuckSilos()" class="p-3 text-orange-500 hover:bg-orange-50 rounded-2xl transition-all border border-transparent hover:border-orange-100" title="Limpar Cargas Concluídas da Fila">
+                                <i data-lucide="broom"></i>
+                            </button>
                              <button onclick="state.siloMap={}; state.completedHistory=[]; render();" class="p-3 text-red-500 hover:bg-red-50 rounded-2xl transition-all border border-transparent hover:border-red-100">
                                 <i data-lucide="trash-2"></i>
                             </button>
@@ -600,27 +642,77 @@
 
         function renderDashboard() {
             const filterDate = state.dashboardDateFilter;
-            let silosToRender = [...FIXED_SILOS];
+            let silosToRender;
             let activeSilosInView = 0;
 
-            // 1. Ordenar os silos: com dados mais recentes primeiro, depois os vazios.
-            silosToRender.sort((a, b) => {
-                const siloA = state.siloMap[a];
-                const siloB = state.siloMap[b];
+            state.filteredViewMap = {}; // Limpa o mapa da visão filtrada
+            
+            if (filterDate) { // Lógica de filtro de data ativada
+                // 1. Unifica todas as cargas (pendentes e concluídas) em um único mapa para evitar duplicatas.
+                // A chave do mapa será o ID da carga (ex: PULMAO-01_20240101_1030).
+                const allItems = {};
+                
+                // Adiciona as cargas pendentes
+                Object.entries(state.siloMap).forEach(([id, data]) => {
+                    allItems[id] = data;
+                });
 
-                if (siloA && !siloB) return -1; // A com dados, B sem -> A primeiro
-                if (!siloA && siloB) return 1;  // A sem dados, B com -> B primeiro
-                if (!siloA && !siloB) return 0; // Ambos sem dados -> mantém ordem
+                // Adiciona as cargas concluídas, sobrescrevendo se já existir (a concluída tem a informação final)
+                // ou adicionando se não existir na fila pendente.
+                state.completedHistory.forEach(record => {
+                    // O 'name' no histórico é o ID original da carga. O 'id' é o ID do registro no Firestore.
+                    const originalLoadId = record.name;
+                    // Garante que a estrutura do objeto seja consistente, usando os dados do histórico
+                    // e adicionando o status de beneficiado.
+                    // O 'name' do registro do histórico (que é o ID da carga) é mantido como 'name'
+                    // para consistência com os itens da 'silosQueue'.
+                    // O 'id' do Firestore é mantido para futuras operações de exclusão.
+                    allItems[originalLoadId] = { ...record, statusBeneficiamento: 'Beneficiado', name: originalLoadId };
+                });
 
-                // Ambos com dados, ordena pela data de coleta (mais recente primeiro)
-                const dateA = new Date(siloA.dataColeta.split('/').reverse().join('-'));
-                const dateB = new Date(siloB.dataColeta.split('/').reverse().join('-'));
-                return dateB - dateA;
-            });
+                // 3. Filtra pela data de coleta
+                silosToRender = Object.entries(allItems).filter(([key, item]) => {
+                    let itemDateStr = ''; // YYYY-MM-DD
 
-            // A contagem de silos ativos agora é sempre o total de silos com dados.
-            // O filtro de data é apenas visual.
-            activeSilosInView = Object.keys(state.siloMap).length;
+                    // Prioritize dataColeta (DD/MM/YYYY)
+                    if (item.dataColeta && typeof item.dataColeta === 'string') {
+                        const parts = item.dataColeta.split('/');
+                        if (parts.length === 3) {
+                            itemDateStr = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+                        }
+                    }
+
+                    // Fallback to timestamp if dataColeta is missing or invalid
+                    if (itemDateStr.length !== 10 && item.timestamp) { // Check if date string is not YYYY-MM-DD
+                        try {
+                            const dateFromTimestamp = new Date(item.timestamp);
+                            if (!isNaN(dateFromTimestamp.getTime())) { // Check if date is valid
+                                itemDateStr = dateFromTimestamp.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+                            }
+                        } catch (e) {
+                            console.warn('Invalid timestamp for item:', item.id, item.timestamp, e);
+                        }
+                    }
+                    
+                    return itemDateStr === filterDate;
+                }).map(([key, item]) => {
+                    state.filteredViewMap[key] = item; // Popula o mapa da visão filtrada com os itens corretos
+                    return key; // Retorna apenas a chave para o array silosToRender
+                }).sort((keyA, keyB) => {
+                    const itemA = state.filteredViewMap[keyA];
+                    const itemB = state.filteredViewMap[keyB];
+                    // Use lastUpdate if available, otherwise timestamp, for sorting
+                    const dateA = new Date(itemA.lastUpdate || itemA.timestamp || 0);
+                    const dateB = new Date(itemB.lastUpdate || itemB.timestamp || 0);
+                    return dateB - dateA; // Sort by most recent first
+                });
+
+                activeSilosInView = silosToRender.length;
+            } else { // Sem filtro de data
+                state.filteredViewMap = { ...state.siloMap };
+                silosToRender = Object.keys(state.filteredViewMap).sort((a, b) => new Date(state.filteredViewMap[b].lastUpdate) - new Date(state.filteredViewMap[a].lastUpdate));
+                activeSilosInView = Object.keys(state.siloMap).length;
+            }
 
             return `
                 <main class="max-w-7xl mx-auto p-4 md:p-8 space-y-8">
@@ -648,43 +740,38 @@
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
-                        ${silosToRender.map(name => renderSiloCard(name, filterDate)).join('')}
+                        ${silosToRender.map(loadId => renderSiloCard(loadId)).join('')}
                     </div>
                 </main>
             `;
         }
 
-        function renderSiloCard(name, filterDate) {
-            const data = state.siloMap[name];
-            if (!data) { // Silo sem dados
+        function renderSiloCard(loadId) {
+            const data = state.filteredViewMap[loadId];
+            if (!data) { // Carga sem dados
                 return `
                     <div class="rounded-[2.5rem] border-2 border-dashed border-slate-200 opacity-40 flex flex-col items-center justify-center py-12 space-y-4">
                         <div class="p-4 bg-slate-200 rounded-full text-slate-500"><i data-lucide="warehouse"></i></div>
-                        <p class="text-[10px] font-black uppercase tracking-widest">${name}</p>
+                        <p class="text-[10px] font-black uppercase tracking-widest">CARGA INVÁLIDA</p>
                     </div>
                 `;
             }
 
-            // Lógica de filtro visual
-            let filterClasses = '';
-            if (filterDate) {
-                const [y, m, d] = filterDate.split('-');
-                const formattedFilterDate = `${d}/${m}/${y}`;
-                if (data.dataColeta !== formattedFilterDate) {
-                    filterClasses = 'opacity-30 hover:opacity-100 transition-opacity';
-                }
-            }
+            // Normalize the silo name for display and capacity calculation
+            // data.name can be "PULMÃO 01" (from silosQueue) or "PULMAO-01_YYYYMMDD_HHMM" (from beneficiamentoRecords)
+            const displaySiloName = normalizeSiloName(data.name) || data.name; // Fallback to raw name if normalization fails
+
             const isDone = data.statusBeneficiamento === 'Beneficiado';
             const isActive = data.statusBeneficiamento === 'Em Beneficiamento';
-            const capacity = getSiloCapacity(data.name); // Usa data.name para obter a capacidade
+            const capacity = getSiloCapacity(displaySiloName); // Use the normalized name for capacity
             const humVal = parseFloat(data.umidade.replace(',', '.'));
             const humClass = (!isNaN(humVal) && humVal >= 12 && humVal <= 13) ? "bg-green-100 border-green-300 text-green-700" : "bg-red-100 border-red-300 text-red-700";
             const isLasaAlert = data.statusLASA.toUpperCase().includes('LASA') || data.statusLASA.toUpperCase().includes('REPROVADO');
-
+            
             return `
                 <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white shadow-xl ${isDone ? 'opacity-60 border-slate-200' : 'border-slate-200'} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
                     <div class="px-6 py-4 flex justify-between items-center rounded-t-[2.3rem] ${isDone ? 'bg-slate-400' : (isActive ? 'bg-blue-600' : 'bg-slate-900')} text-white">
-                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${data.name}</span></div>
+                        <div class="flex items-center gap-2"><i data-lucide="warehouse" class="w-4 h-4"></i><span class="text-sm font-black uppercase">${displaySiloName}</span></div>
                         <span class="text-[10px] font-black">${capacity}T</span>
                     </div>
 
@@ -695,7 +782,7 @@
                                     if (isDone) {
                                         return `
                                             <div class="absolute inset-0 bg-slate-100/80 backdrop-blur-[2px] rounded-xl flex items-center justify-center z-10">
-                                                <button onclick="confirmStatusChange('${name}', 'Em Beneficiamento')" class="flex items-center gap-2 text-sm font-black bg-white border-2 border-yellow-400 text-yellow-700 px-4 py-2 rounded-xl shadow-lg hover:bg-yellow-50 transition-all">
+                                                <button onclick="confirmStatusChange('${loadId}', 'Em Beneficiamento')" class="flex items-center gap-2 text-sm font-black bg-white border-2 border-yellow-400 text-yellow-700 px-4 py-2 rounded-xl shadow-lg hover:bg-yellow-50 transition-all">
                                                     <i data-lucide="edit" class="w-4 h-4"></i> Editar Lançamento
                                                 </button>
                                             </div>
@@ -707,7 +794,7 @@
                                     }
                                     // Default: "Aguardando"
                                     return `
-                                        <button onclick="confirmStatusChange('${name}', 'Em Beneficiamento')" class="w-full py-3 text-sm font-black uppercase rounded-lg transition-all bg-blue-600 text-white shadow hover:bg-blue-500">
+                                        <button onclick="confirmStatusChange('${loadId}', 'Em Beneficiamento')" class="w-full py-3 text-sm font-black uppercase rounded-lg transition-all bg-blue-600 text-white shadow hover:bg-blue-500">
                                             Beneficiar
                                         </button>
                                     `;
@@ -733,9 +820,9 @@
                         <div class="flex justify-between items-center bg-white border border-slate-200 p-2 rounded-xl shadow-sm">
                             <span class="text-[9px] font-black text-slate-400 uppercase">Tonelagem:</span>
                             <div class="flex items-center gap-1 px-2 py-0.5 rounded-lg border ${!data.tonelagem || data.tonelagem <= 0 ? 'bg-red-50 border-red-300 animate-shake' : 'bg-slate-50 border-slate-200'}">
-                                <input type="number" value="${data.tonelagem}" 
-                                       onchange="updateSiloTonnage('${name}', this)" 
-                                       class="bg-transparent text-sm font-black w-10 outline-none text-right placeholder:text-red-300" 
+                                <input type="number" value="${data.tonelagem}"
+                                       onchange="updateSiloTonnage('${loadId}', this)"
+                                       class="bg-transparent text-sm font-black w-10 outline-none text-right placeholder:text-red-300"
                                        placeholder="0"
                                 />
                                 <span class="text-[10px] font-bold text-slate-400 uppercase">T</span>

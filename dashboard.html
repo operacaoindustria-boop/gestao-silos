@@ -486,15 +486,19 @@
         async function fetchDashboardData() {
             if(!db || !auth.currentUser) return;
             try {
-                // Listener Real-Time para a coleção de registros de beneficiamento
+                // OTIMIZAÇÃO: Removemos o listener em tempo real (onSnapshot) que carregava TUDO.
+                // Agora, usamos .get() para buscar os dados uma única vez ao carregar a página.
+                // Isso torna o carregamento do dashboard muito mais rápido.
+                // Para atualizar, o usuário pode recarregar a página ou podemos adicionar um botão "Atualizar".
                 const q = db.collection(`beneficiamentoRecords`);
                 
-                q.onSnapshot((snap) => {
+                const snap = await q.get();
+                
                     // Mapeamos os dados, incluindo o ID do documento para permitir exclusão
-                    cachedData = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-                    currentGlobalFilteredData = cachedData;
-                    applyFilters(); // Atualiza a tela sempre que um novo dado chegar
-                });
+                cachedData = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                currentGlobalFilteredData = cachedData;
+                applyFilters(); // Atualiza a tela com os dados carregados
+                showNotification('success', `${cachedData.length} registros carregados.`);
 
             } catch(e) { console.error(e); showNotification('error','Erro dados'); }
         };

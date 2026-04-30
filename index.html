@@ -95,8 +95,18 @@
             view: 'dashboard', // dashboard | beneficiamento | managementDashboard
             selectedSiloId: null,
             siloMap: {},
+            // --- Otimização de Performance ---
+            // 'completedHistory' agora é carregado sob demanda (paginação)
+            // para evitar sobrecarga de memória e lentidão.
             completedHistory: [],
+            lastVisibleRecord: null, // Ponteiro para o último documento carregado na paginação
+            isLoadingMore: false,    // Flag para evitar múltiplos carregamentos simultâneos
+            hasMoreRecords: true,    // Flag para saber se ainda há registros a serem carregados
+            // ---------------------------------
+            filteredViewMap: {}, // Mapa para a visão filtrada, evita reprocessamento
             dashboardDateFilter: '', // NOVO: Estado para o filtro de data do dashboard
+            dashboardSiloFilter: '', // NOVO: Estado para o filtro de silo
+            dashboardCultureFilter: '', // NOVO: Estado para o filtro de cultivar
             searchTerm: '', // Usado para filtros futuros, se implementado
             errorMessage: null, // Para exibir erros ao usuário
             // Estados temporários para a aba de beneficiamento
@@ -651,75 +661,78 @@
 
         function renderDashboard() {
             const filterDate = state.dashboardDateFilter;
+            const filterCulture = state.dashboardCultureFilter;
+            const filterSilo = state.dashboardSiloFilter; // NEW
+            const isFiltered = !!filterDate || !!filterCulture || !!filterSilo; // UPDATED
             let silosToRender;
             let activeSilosInView = 0;
-
+        
             state.filteredViewMap = {}; // Limpa o mapa da visão filtrada
 
-            if (filterDate) { // Lógica de filtro de data ativada
-                // 1. Unifica todas as cargas (pendentes e concluídas) de forma segura para evitar duplicatas.
-                const allItems = {};
+            // Unify all items (pending and completed) for filtering
+            const allItems = {};
+            state.completedHistory.forEach(record => {
+                const originalLoadId = record.name; // This is the uniqueLoadId
+                allItems[originalLoadId] = { ...record, statusBeneficiamento: 'Beneficiado', name: originalLoadId }; // Ensure 'name' is the uniqueLoadId
+            });
+            Object.entries(state.siloMap).forEach(([id, data]) => {
+                if (!allItems[id]) { // Add pending items only if not already in completed (prevents duplicates if a completed item is still in silosQueue)
+                    allItems[id] = data;
+                }
+            });
 
-                // Primeiro, adiciona todos os registros concluídos ao mapa.
-                state.completedHistory.forEach(record => {
-                    const originalLoadId = record.name;
-                    // CORREÇÃO: Garante que o objeto do histórico tenha a mesma estrutura que o da fila,
-                    // especialmente a propriedade 'name' que é usada para o ID da carga.
-                    // O 'name' do registro do histórico (que é o ID da carga) é mantido como 'name'.
-                    allItems[originalLoadId] = { ...record, statusBeneficiamento: 'Beneficiado', name: originalLoadId };
-                });
+            // Apply filters to allItems
+            silosToRender = Object.entries(allItems).filter(([key, item]) => {
+                let itemDateStr = ''; // YYYY-MM-DD
 
-                // Em seguida, adiciona as cargas pendentes SOMENTE se elas ainda não existirem no mapa de concluídos.
-                Object.entries(state.siloMap).forEach(([id, data]) => {
-                    if (!allItems[id]) {
-                        allItems[id] = data;
+                // Prioritize dataColeta (DD/MM/YYYY)
+                if (item.dataColeta && typeof item.dataColeta === 'string') {
+                    const parts = item.dataColeta.split('/');
+                    if (parts.length === 3) {
+                        itemDateStr = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
                     }
-                });
+                }
 
-                // 3. Filtra pela data de coleta
-                silosToRender = Object.entries(allItems).filter(([key, item]) => {
-                    let itemDateStr = ''; // YYYY-MM-DD
-
-                    // Prioritize dataColeta (DD/MM/YYYY)
-                    if (item.dataColeta && typeof item.dataColeta === 'string') {
-                        const parts = item.dataColeta.split('/');
-                        if (parts.length === 3) {
-                            itemDateStr = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+                // Fallback to timestamp if dataColeta is missing or invalid
+                if (itemDateStr.length !== 10 && item.timestamp) { // Check if date string is not YYYY-MM-DD
+                    try {
+                        const dateFromTimestamp = new Date(item.timestamp);
+                        if (!isNaN(dateFromTimestamp.getTime())) { // Check if date is valid
+                            itemDateStr = dateFromTimestamp.toISOString().split('T')[0]; // Format: YYYY-MM-DD
                         }
+                    } catch (e) {
+                        console.warn('Invalid timestamp for item:', item.id, item.timestamp, e);
                     }
+                }
+                
+                const dateMatch = filterDate ? itemDateStr === filterDate : true;
+                const siloMatch = filterSilo ? (normalizeSiloName(item.name) === filterSilo) : true; // Use normalized name for comparison
+                const cultureMatch = filterCulture ? item.cultivar === filterCulture : true;
 
-                    // Fallback to timestamp if dataColeta is missing or invalid
-                    if (itemDateStr.length !== 10 && item.timestamp) { // Check if date string is not YYYY-MM-DD
-                        try {
-                            const dateFromTimestamp = new Date(item.timestamp);
-                            if (!isNaN(dateFromTimestamp.getTime())) { // Check if date is valid
-                                itemDateStr = dateFromTimestamp.toISOString().split('T')[0]; // Format: YYYY-MM-DD
-                            }
-                        } catch (e) {
-                            console.warn('Invalid timestamp for item:', item.id, item.timestamp, e);
-                        }
-                    }
-                    
-                    return itemDateStr === filterDate;
-                }).map(([key, item]) => {
-                    state.filteredViewMap[key] = item; // Popula o mapa da visão filtrada com os itens corretos
-                    return key; // Retorna apenas a chave para o array silosToRender
-                }).sort((keyA, keyB) => {
-                    const itemA = state.filteredViewMap[keyA];
-                    const itemB = state.filteredViewMap[keyB];
-                    // Use lastUpdate if available, otherwise timestamp, for sorting
-                    const dateA = new Date(itemA.lastUpdate || itemA.timestamp || 0);
-                    const dateB = new Date(itemB.lastUpdate || itemB.timestamp || 0);
-                    return dateB - dateA; // Sort by most recent first
-                });
+                return dateMatch && siloMatch && cultureMatch;
+            }).map(([key, item]) => {
+                state.filteredViewMap[key] = item; // Popula o mapa da visão filtrada com os itens corretos
+                return key; // Retorna apenas a chave para o array silosToRender
+            }).sort((keyA, keyB) => {
+                const itemA = state.filteredViewMap[keyA];
+                const itemB = state.filteredViewMap[keyB];
+                // Use lastUpdate if available, otherwise timestamp, for sorting
+                const dateA = new Date(itemA.lastUpdate || itemA.timestamp || 0);
+                const dateB = new Date(itemB.lastUpdate || itemB.timestamp || 0);
+                return dateB - dateA; // Sort by most recent first
+            });
 
-                activeSilosInView = silosToRender.length;
-            } else { // Sem filtro de data
-                state.filteredViewMap = { ...state.siloMap };
-                silosToRender = Object.keys(state.filteredViewMap).sort((a, b) => new Date(state.filteredViewMap[b].lastUpdate) - new Date(state.filteredViewMap[a].lastUpdate));
-                activeSilosInView = Object.keys(state.siloMap).length;
-            }
+            activeSilosInView = silosToRender.length;
 
+            // Obtém a lista de silos únicos para popular o filtro
+            const uniqueSilos = [...new Set(Object.values(allItems).map(item => normalizeSiloName(item.name)).filter(Boolean))].sort();
+            // Obtém a lista de cultivares únicos para popular o filtro
+            const allItemsForCultures = [
+                ...Object.values(state.siloMap),
+                ...state.completedHistory
+            ];
+            const uniqueCultures = [...new Set(allItemsForCultures.map(item => item.cultivar).filter(Boolean))].sort();
+        
             return `
                 <main class="max-w-7xl mx-auto p-4 md:p-8 space-y-8">
                     <!-- Import Section -->
@@ -739,14 +752,35 @@
                     <!-- Silos Grid -->
                     <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pt-4 border-t border-slate-200">
                         <h3 class="text-lg font-black text-slate-700">Monitoramento de Silos (${activeSilosInView})</h3>
-                        <div class="flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
-                            <label for="date-filter" class="text-xs font-bold text-slate-500 pl-2">Filtrar por Data:</label>
-                            <input type="date" id="date-filter" value="${state.dashboardDateFilter}" onchange="state.dashboardDateFilter = this.value; render();" class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-blue-400">
-                            ${filterDate ? `<button onclick="state.dashboardDateFilter = ''; render();" class="p-2 text-red-500 hover:bg-red-100 rounded-lg" title="Limpar filtro"><i data-lucide="x" class="w-4 h-4"></i></button>` : ''}
+                        <div class="flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm flex-wrap">
+                            <label for="date-filter" class="text-xs font-bold text-slate-500 pl-2">Data:</label>
+                            <input type="date" id="date-filter" value="${state.dashboardDateFilter}" onchange="state.dashboardDateFilter = this.value; render();" class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-400">
+
+                            <label for="silo-filter" class="text-xs font-bold text-slate-500 pl-2">Silo:</label>
+                            <select id="silo-filter" onchange="state.dashboardSiloFilter = this.value; render();" class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-400">
+                                <option value="">Todos</option>
+                                ${uniqueSilos.map(silo => `<option value="${silo}" ${state.dashboardSiloFilter === silo ? 'selected' : ''}>${silo}</option>`).join('')}
+                            </select>
+
+                            <label for="culture-filter" class="text-xs font-bold text-slate-500 pl-2">Cultivar:</label>
+                            <select id="culture-filter" onchange="state.dashboardCultureFilter = this.value; render();" class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-400">
+                                <option value="">Todos</option>
+                                ${uniqueCultures.map(culture => `<option value="${culture}" ${state.dashboardCultureFilter === culture ? 'selected' : ''}>${culture}</option>`).join('')}
+                            </select>
+
+                            ${isFiltered ? `<button onclick="state.dashboardDateFilter = ''; state.dashboardSiloFilter = ''; state.dashboardCultureFilter = ''; render();" class="p-2 text-red-500 hover:bg-red-100 rounded-lg" title="Limpar filtros"><i data-lucide="x" class="w-4 h-4"></i></button>` : ''}
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
                         ${silosToRender.map(loadId => renderSiloCard(loadId)).join('')}
+                        ${!isFiltered && state.completedHistory.length === 0 && !state.hasMoreRecords ? `<div class="col-span-full text-center py-10 text-slate-500">Nenhum silo na fila.</div>` : ''}
+                    </div>
+                    
+                    ${!isFiltered && state.hasMoreRecords ? `
+                        <div id="load-more-trigger" class="text-center py-8">
+                            <button onclick="loadMoreRecords()" class="bg-slate-200 text-slate-700 font-bold py-3 px-6 rounded-xl hover:bg-slate-300 transition-all disabled:opacity-50" ${state.isLoadingMore ? 'disabled' : ''}>${state.isLoadingMore ? 'Carregando...' : 'Carregar Mais Antigos'}</button>
+                        </div>
+                    ` : ''}
                     </div>
                 </main>
             `;
@@ -772,7 +806,7 @@
             const capacity = getSiloCapacity(displaySiloName); // Use the normalized name for capacity
             const humVal = parseFloat(data.umidade.replace(',', '.'));
             const humClass = (!isNaN(humVal) && humVal >= 12 && humVal <= 13) ? "bg-green-100 border-green-300 text-green-700" : "bg-red-100 border-red-300 text-red-700";
-            const isLasaAlert = data.statusLASA.toUpperCase().includes('LASA') || data.statusLASA.toUpperCase().includes('REPROVADO');
+            const isLasaAlert = (data.statusLASA || '').toUpperCase().includes('LASA') || (data.statusLASA || '').toUpperCase().includes('REPROVADO');
             
             return `
                 <div class="rounded-[2.5rem] border-2 transition-all duration-500 flex flex-col relative bg-white shadow-xl ${isDone ? 'opacity-60 border-slate-200' : 'border-slate-200'} ${isActive ? 'border-blue-400 ring-4 ring-blue-500/10' : ''}">
@@ -1029,6 +1063,39 @@
         let isLoadingSilos = true;
         let isLoadingRecords = true;
 
+        // --- OTIMIZAÇÃO: Carregamento Paginado ---
+        const RECORDS_PER_PAGE = 40; // Define quantos registros carregar por vez
+
+        async function loadMoreRecords() {
+            if (state.isLoadingMore || !state.hasMoreRecords || state.dashboardDateFilter || state.dashboardSiloFilter || state.dashboardCultureFilter) return; // UPDATED
+
+            state.isLoadingMore = true;
+            render(); // Atualiza a UI para mostrar "Carregando..." no botão
+            if (!isLoadingRecords) render(); // Atualiza a UI para mostrar "Carregando..." no botão
+
+            let query = db.collection('beneficiamentoRecords').orderBy('timestamp', 'desc').limit(RECORDS_PER_PAGE);
+
+            if (state.lastVisibleRecord) {
+                query = query.startAfter(state.lastVisibleRecord);
+            }
+
+            try {
+                const snapshot = await query.get();
+                const newRecords = [];
+                snapshot.forEach(doc => newRecords.push({ id: doc.id, ...doc.data() }));
+
+                state.completedHistory = [...state.completedHistory, ...newRecords];
+                state.lastVisibleRecord = snapshot.docs[snapshot.docs.length - 1];
+                state.hasMoreRecords = snapshot.docs.length === RECORDS_PER_PAGE;
+            } catch (error) {
+                console.error("Erro ao carregar mais registros:", error);
+                state.errorMessage = { title: "Erro de Paginação", message: "Não foi possível carregar mais registros históricos." };
+            } finally {
+                state.isLoadingMore = false;
+                if (!isLoadingRecords) render();
+            }
+        }
+
         function setupFirebaseListeners() {
             // Listener para a fila de silos
             db.collection('silosQueue').onSnapshot(snapshot => {
@@ -1038,29 +1105,31 @@
                 });
                 state.siloMap = newSiloMap;
                 isLoadingSilos = false;
-                render(); // Re-renderiza quando os dados dos silos chegam/atualizam
+                if (!isLoadingRecords) render();
             }, error => {
                 console.error("Erro ao buscar silosQueue:", error);
                 state.errorMessage = { title: "Erro de Conexão", message: "Não foi possível carregar a fila de silos do Firebase." };
                 isLoadingSilos = false;
-                render();
+                if (!isLoadingRecords) render();
             });
 
-            // Listener para os registros de beneficiamento
-            db.collection('beneficiamentoRecords').orderBy('timestamp', 'desc').onSnapshot(snapshot => {
-                const newCompletedHistory = [];
-                snapshot.forEach(doc => {
-                    newCompletedHistory.push(doc.data());
-                });
-                state.completedHistory = newCompletedHistory;
+            // Carregamento inicial dos registros de beneficiamento (primeira página)
+            // Usamos .get() em vez de .onSnapshot() para não sobrecarregar com o histórico completo.
+            db.collection('beneficiamentoRecords').orderBy('timestamp', 'desc').limit(RECORDS_PER_PAGE).get().then(snapshot => {
+                const initialRecords = [];
+                snapshot.forEach(doc => initialRecords.push({ id: doc.id, ...doc.data() }));
+                state.completedHistory = initialRecords;
+                state.lastVisibleRecord = snapshot.docs[snapshot.docs.length - 1];
+                state.hasMoreRecords = snapshot.docs.length === RECORDS_PER_PAGE;
                 isLoadingRecords = false;
-                render(); // Re-renderiza quando os dados dos registros chegam/atualizam
+                if (!isLoadingSilos) render();
             }, error => {
                 console.error("Erro ao buscar beneficiamentoRecords:", error);
                 state.errorMessage = { title: "Erro de Conexão", message: "Não foi possível carregar o histórico de beneficiamento do Firebase." };
                 isLoadingRecords = false;
-                render();
+                if (!isLoadingSilos) render();
             });
+            // Initial load of records is handled by the onSnapshot listener above.
         }
 
         // --- RENDERIZADOR PRINCIPAL ---
@@ -1087,6 +1156,21 @@
             // Atraso para garantir que o DOM foi atualizado antes de renderizar os gráficos
             setTimeout(() => {
                 lucide.createIcons();
+
+                // --- OTIMIZAÇÃO: Intersection Observer para Carregamento Infinito ---
+                // Só ativa se não houver filtro de data aplicado.
+                if (!state.dashboardDateFilter && !state.dashboardSiloFilter && !state.dashboardCultureFilter) { // UPDATED
+                    const trigger = document.getElementById('load-more-trigger');
+                    if (trigger) {
+                        const observer = new IntersectionObserver((entries) => {
+                            if (entries[0].isIntersecting) {
+                                loadMoreRecords();
+                                observer.unobserve(trigger); // Desconecta para evitar chamadas múltiplas enquanto carrega
+                            }
+                        }, { threshold: 0.1 });
+                        observer.observe(trigger);
+                    }
+                } // End of Intersection Observer block
             }, 0);
 
             // Gerenciamento do Modal de Erro
